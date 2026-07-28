@@ -175,9 +175,16 @@ jobs:
   # Always publish to GitHub Releases so binaries appear under /releases.
   # - push diy / workflow_dispatch → rolling prerelease tag diy-latest
   # - tag diy-v* → versioned release (non-prerelease)
+  #
+  # Requires repo setting:
+  #   Settings → Actions → General → Workflow permissions → Read and write
+  # (API: default_workflow_permissions=write). Read-only GITHUB_TOKEN causes 403.
   release:
     needs: build-binaries
     runs-on: ubuntu-latest
+    # Job-level write is required even when workflow default is restricted.
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -193,12 +200,13 @@ jobs:
           set -euo pipefail
           mkdir -p release-assets
           shopt -s nullglob
-          for f in artifacts/*; do
-            [ -f "$f" ] || continue
+          # download-artifact may nest by artifact name
+          while IFS= read -r -d '' f; do
             case "$(basename "$f")" in
               *.tar.gz|*.zip) cp "$f" release-assets/ ;;
             esac
-          done
+          done < <(find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0)
+
           echo "Release assets:"
           ls -la release-assets/
           count=$(find release-assets -type f | wc -l | tr -d ' ')
@@ -213,7 +221,6 @@ jobs:
           PKG_VER=""
           if [[ -n "$SAMPLE" ]]; then
             base=$(basename "$SAMPLE")
-            # sub2api-VER-goos-goarch.ext
             PKG_VER=$(echo "$base" | sed -E 's/^sub2api-//; s/-(linux|windows|darwin)-.*$//')
           fi
           if [[ -z "$PKG_VER" ]]; then
@@ -224,57 +231,100 @@ jobs:
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
             echo "name=DIY ${GITHUB_REF#refs/tags/} (${PKG_VER})" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
-            echo "generate_notes=true" >> "$GITHUB_OUTPUT"
           else
             echo "tag=diy-latest" >> "$GITHUB_OUTPUT"
             echo "name=DIY ${PKG_VER}" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
-            echo "generate_notes=false" >> "$GITHUB_OUTPUT"
           fi
           echo "pkg_ver=$PKG_VER" >> "$GITHUB_OUTPUT"
           echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           echo "short=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
 
-      - name: Reset rolling diy-latest release (avoid stale assets)
-        if: steps.meta.outputs.tag == 'diy-latest'
+      - name: Publish GitHub Release (gh cli)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_NAME: ${{ steps.meta.outputs.name }}
+          RELEASE_COMMIT: ${{ steps.meta.outputs.commit }}
+          RELEASE_SHORT: ${{ steps.meta.outputs.short }}
+          PKG_VER: ${{ steps.meta.outputs.pkg_ver }}
+          IS_PRERELEASE: ${{ steps.meta.outputs.prerelease }}
         shell: bash
         run: |
-          gh release delete diy-latest --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+          set -euo pipefail
+          REPO="${{ github.repository }}"
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: ${{ steps.meta.outputs.name }}
-          target_commitish: ${{ steps.meta.outputs.commit }}
-          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
-          generate_release_notes: ${{ steps.meta.outputs.generate_notes == 'true' }}
-          body: |
-            Sub2API **DIY** 单二进制发布（SQLite WAL + 嵌入式 Redis + 内嵌 Web UI）。
+          # Prove token can write; fail with actionable message if repo still read-only.
+          if ! gh api "repos/${REPO}" --jq .permissions.push >/dev/null 2>&1; then
+            echo "::error::Cannot query repo with GITHUB_TOKEN"
+            exit 1
+          fi
 
-            - **版本（包名）**: `${{ steps.meta.outputs.pkg_ver }}`（构建日 UTC `YYMMDD`）
-            - **Commit**: `${{ steps.meta.outputs.short }}`
-            - **Tag**: `${{ steps.meta.outputs.tag }}`
-            - 仅需暴露 **8080**
+          NOTES_FILE="$(mktemp)"
+          cat > "$NOTES_FILE" <<EOF
+          Sub2API **DIY** 单二进制发布（SQLite WAL + 嵌入式 Redis + 内嵌 Web UI）。
 
-            详见 `README_DIY.md` / `README_DIY_CN.md`。
+          - **版本（包名）**: \`${PKG_VER}\`（构建日 UTC \`YYMMDD\`）
+          - **Commit**: \`${RELEASE_SHORT}\`
+          - **Tag**: \`${RELEASE_TAG}\`
+          - 仅需暴露 **8080**
 
-            ```bash
-            export DEPLOY_MODE=diy
-            ./sub2api
-            ```
+          详见 \`README_DIY.md\` / \`README_DIY_CN.md\`。
 
-            ### 下载文件命名
+          \`\`\`bash
+          export DEPLOY_MODE=diy
+          ./sub2api
+          \`\`\`
 
-            ```
-            sub2api-${{ steps.meta.outputs.pkg_ver }}-linux-amd64.tar.gz
-            sub2api-${{ steps.meta.outputs.pkg_ver }}-linux-arm64.tar.gz
-            sub2api-${{ steps.meta.outputs.pkg_ver }}-windows-amd64.zip
-            sub2api-${{ steps.meta.outputs.pkg_ver }}-darwin-amd64.tar.gz
-            sub2api-${{ steps.meta.outputs.pkg_ver }}-darwin-arm64.tar.gz
-            ```
-          files: |
-            release-assets/*
-          fail_on_unmatched_files: true
+          ### 下载文件命名
+
+          \`\`\`
+          sub2api-${PKG_VER}-linux-amd64.tar.gz
+          sub2api-${PKG_VER}-linux-arm64.tar.gz
+          sub2api-${PKG_VER}-windows-amd64.zip
+          sub2api-${PKG_VER}-darwin-amd64.tar.gz
+          sub2api-${PKG_VER}-darwin-arm64.tar.gz
+          \`\`\`
+          EOF
+          # strip accidental leading spaces from heredoc lines
+          sed -i 's/^          //' "$NOTES_FILE"
+
+          # Rolling tag: delete previous release+tag so asset names stay clean.
+          if [[ "$RELEASE_TAG" == "diy-latest" ]]; then
+            gh release delete "$RELEASE_TAG" --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
+          fi
+
+          CREATE_ARGS=(
+            release create "$RELEASE_TAG"
+            --repo "$REPO"
+            --target "$RELEASE_COMMIT"
+            --title "$RELEASE_NAME"
+            --notes-file "$NOTES_FILE"
+          )
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            CREATE_ARGS+=(--prerelease)
+          fi
+
+          shopt -s nullglob
+          ASSETS=(release-assets/*)
+          if [[ ${#ASSETS[@]} -lt 1 ]]; then
+            echo "::error::No assets to upload"
+            exit 1
+          fi
+          CREATE_ARGS+=("${ASSETS[@]}")
+
+          echo "Creating release: tag=$RELEASE_TAG title=$RELEASE_NAME assets=${#ASSETS[@]}"
+          set +e
+          OUT="$(gh "${CREATE_ARGS[@]}" 2>&1)"
+          RC=$?
+          set -e
+          echo "$OUT"
+          if [[ $RC -ne 0 ]]; then
+            if echo "$OUT" | grep -qiE 'Resource not accessible|403|HTTP 403'; then
+              echo "::error::GITHUB_TOKEN lacks permission to create releases (403)."
+              echo "::error::Fix: Repo Settings → Actions → General → Workflow permissions → 'Read and write permissions', then re-run."
+              echo "::error::Or set a PAT secret RELEASE_TOKEN with 'contents: write' and use it as GH_TOKEN."
+            fi
+            exit $RC
+          fi
+          echo "Release published: https://github.com/${REPO}/releases/tag/${RELEASE_TAG}"
