@@ -25,7 +25,7 @@ func NewUsageCleanupRepository(client *dbent.Client, sqlDB *sql.DB) service.Usag
 }
 
 func newUsageCleanupRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor) *usageCleanupRepository {
-	return &usageCleanupRepository{client: client, sql: sqlq}
+	return &usageCleanupRepository{client: client, sql: adaptSQLExecutor(sqlq)}
 }
 
 func (r *usageCleanupRepository) CreateTask(ctx context.Context, task *service.UsageCleanupTask) error {
@@ -120,6 +120,13 @@ func (r *usageCleanupRepository) ClaimNextPendingTask(ctx context.Context, stale
 	if staleRunningAfterSeconds <= 0 {
 		staleRunningAfterSeconds = 1800
 	}
+	if IsSQLiteDialect() {
+		return r.claimNextPendingTaskSQLite(ctx, staleRunningAfterSeconds)
+	}
+	return r.claimNextPendingTaskPostgres(ctx, staleRunningAfterSeconds)
+}
+
+func (r *usageCleanupRepository) claimNextPendingTaskPostgres(ctx context.Context, staleRunningAfterSeconds int64) (*service.UsageCleanupTask, error) {
 	query := `
 		WITH next AS (
 			SELECT id
@@ -145,6 +152,48 @@ func (r *usageCleanupRepository) ClaimNextPendingTask(ctx context.Context, stale
 		RETURNING tasks.id, tasks.status, tasks.filters, tasks.created_by, tasks.deleted_rows, tasks.error_message,
 			tasks.started_at, tasks.finished_at, tasks.created_at, tasks.updated_at
 	`
+	return r.scanClaimedUsageCleanupTask(ctx, query, []any{
+		service.UsageCleanupStatusPending,
+		service.UsageCleanupStatusRunning,
+		staleRunningAfterSeconds,
+		service.UsageCleanupStatusRunning,
+	})
+}
+
+func (r *usageCleanupRepository) claimNextPendingTaskSQLite(ctx context.Context, staleRunningAfterSeconds int64) (*service.UsageCleanupTask, error) {
+	// SQLite has no FOR UPDATE SKIP LOCKED / interval syntax. Single-writer DIY
+	// makes a simple subquery claim safe enough for one process.
+	query := `
+		UPDATE usage_cleanup_tasks
+		SET status = ?,
+			started_at = datetime('now'),
+			finished_at = NULL,
+			error_message = NULL,
+			updated_at = datetime('now')
+		WHERE id = (
+			SELECT id
+			FROM usage_cleanup_tasks
+			WHERE status = ?
+				OR (
+					status = ?
+					AND started_at IS NOT NULL
+					AND started_at < datetime('now', printf('-%d seconds', ?))
+				)
+			ORDER BY created_at ASC
+			LIMIT 1
+		)
+		RETURNING id, status, filters, created_by, deleted_rows, error_message,
+			started_at, finished_at, created_at, updated_at
+	`
+	return r.scanClaimedUsageCleanupTask(ctx, query, []any{
+		service.UsageCleanupStatusRunning,
+		service.UsageCleanupStatusPending,
+		service.UsageCleanupStatusRunning,
+		staleRunningAfterSeconds,
+	})
+}
+
+func (r *usageCleanupRepository) scanClaimedUsageCleanupTask(ctx context.Context, query string, args []any) (*service.UsageCleanupTask, error) {
 	var task service.UsageCleanupTask
 	var filtersJSON []byte
 	var errMsg sql.NullString
@@ -154,12 +203,7 @@ func (r *usageCleanupRepository) ClaimNextPendingTask(ctx context.Context, stale
 		ctx,
 		r.sql,
 		query,
-		[]any{
-			service.UsageCleanupStatusPending,
-			service.UsageCleanupStatusRunning,
-			staleRunningAfterSeconds,
-			service.UsageCleanupStatusRunning,
-		},
+		args,
 		&task.ID,
 		&task.Status,
 		&filtersJSON,
@@ -190,6 +234,7 @@ func (r *usageCleanupRepository) ClaimNextPendingTask(ctx context.Context, stale
 	}
 	return &task, nil
 }
+
 
 func (r *usageCleanupRepository) GetTaskStatus(ctx context.Context, taskID int64) (string, error) {
 	if r.client != nil {

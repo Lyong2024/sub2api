@@ -30,7 +30,7 @@ func NewProxyRepository(client *dbent.Client, sqlDB *sql.DB) service.ProxyReposi
 }
 
 func newProxyRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor) *proxyRepository {
-	return &proxyRepository{client: client, sql: sqlq}
+	return &proxyRepository{client: client, sql: adaptSQLExecutor(sqlq)}
 }
 
 func (r *proxyRepository) Create(ctx context.Context, proxyIn *service.Proxy) error {

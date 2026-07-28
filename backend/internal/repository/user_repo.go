@@ -39,7 +39,7 @@ func NewUserRepository(client *dbent.Client, sqlDB *sql.DB) service.UserReposito
 }
 
 func newUserRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor) *userRepository {
-	return &userRepository{client: client, sql: sqlq}
+	return &userRepository{client: client, sql: adaptSQLExecutor(sqlq)}
 }
 
 func (r *userRepository) Create(ctx context.Context, userIn *service.User) error {

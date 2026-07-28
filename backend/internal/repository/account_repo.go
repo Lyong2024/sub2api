@@ -84,7 +84,7 @@ func NewAdminAccountRepository(client *dbent.Client, sqlDB *sql.DB, schedulerCac
 // newAccountRepositoryWithSQL 是内部构造函数，支持依赖注入 SQL 执行器。
 // 这种设计便于单元测试时注入 mock 对象。
 func newAccountRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor, schedulerCache service.SchedulerCache) *accountRepository {
-	return &accountRepository{client: client, sql: sqlq, schedulerCache: schedulerCache}
+	return &accountRepository{client: client, sql: adaptSQLExecutor(sqlq), schedulerCache: schedulerCache}
 }
 
 func (r *accountRepository) Create(ctx context.Context, account *service.Account) error {
@@ -1099,6 +1099,13 @@ func (r *accountRepository) ListOAuthRefreshCandidatePage(ctx context.Context, o
 		return nil, errors.New("oauth refresh candidate page limit must be between 1 and 1000")
 	}
 
+	if IsSQLiteDialect() {
+		return r.listOAuthRefreshCandidatePageSQLite(ctx, options)
+	}
+	return r.listOAuthRefreshCandidatePagePostgres(ctx, options)
+}
+
+func (r *accountRepository) listOAuthRefreshCandidatePagePostgres(ctx context.Context, options service.OAuthRefreshPageOptions) (*service.OAuthRefreshCandidatePage, error) {
 	// (cond) IS NOT TRUE 把 NULL 和 FALSE 都视为"可被刷新"。直接写
 	// NOT (a AND b) 在 PG 三值逻辑下会把 a 或 b 为 NULL 的行（即绝大多数
 	// 健康账号：temp_unschedulable_until=NULL）也排除，导致后台 token
@@ -1140,6 +1147,64 @@ func (r *accountRepository) ListOAuthRefreshCandidatePage(ctx context.Context, o
 	if err != nil {
 		return nil, err
 	}
+	return r.finishOAuthRefreshCandidatePage(ctx, rows, options.Limit)
+}
+
+func (r *accountRepository) listOAuthRefreshCandidatePageSQLite(ctx context.Context, options service.OAuthRefreshPageOptions) (*service.OAuthRefreshCandidatePage, error) {
+	// SQLite: no ANY()/JSONB operators. Use IN (...) and json_extract.
+	placeholders := make([]string, len(options.Platforms))
+	args := make([]any, 0, len(options.Platforms)+2)
+	for i, platform := range options.Platforms {
+		placeholders[i] = "?"
+		args = append(args, platform)
+	}
+	args = append(args, options.AfterID)
+
+	query := `
+		SELECT id
+		FROM accounts
+		WHERE deleted_at IS NULL
+			AND platform IN (` + strings.Join(placeholders, ",") + `)
+			AND id > ?`
+	if options.ActiveOnly {
+		query += `
+			AND status = 'active'`
+	}
+	if options.IncludeSetupToken {
+		query += `
+			AND type IN ('oauth', 'setup-token')`
+	} else {
+		query += `
+			AND type = 'oauth'`
+	}
+	if options.RequireRefreshToken {
+		// Ent stores JSON as TEXT on SQLite; json_extract is available in modernc.
+		query += `
+			AND json_extract(credentials, '$.refresh_token') IS NOT NULL
+			AND trim(CAST(json_extract(credentials, '$.refresh_token') AS TEXT)) <> ''`
+	}
+	if options.ExcludeRetryCooldown {
+		// Treat NULL/false as refreshable (same intent as PG "IS NOT TRUE").
+		query += `
+			AND NOT (
+				temp_unschedulable_until IS NOT NULL
+				AND temp_unschedulable_until > datetime('now')
+				AND temp_unschedulable_reason LIKE 'token refresh retry exhausted:%'
+			)`
+	}
+	query += `
+		ORDER BY id ASC
+		LIMIT ?`
+	args = append(args, options.Limit)
+
+	rows, err := r.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return r.finishOAuthRefreshCandidatePage(ctx, rows, options.Limit)
+}
+
+func (r *accountRepository) finishOAuthRefreshCandidatePage(ctx context.Context, rows *sql.Rows, limit int) (*service.OAuthRefreshCandidatePage, error) {
 	defer func() { _ = rows.Close() }()
 
 	var ids []int64
@@ -1175,13 +1240,14 @@ func (r *accountRepository) ListOAuthRefreshCandidatePage(ctx context.Context, o
 	}
 	page := &service.OAuthRefreshCandidatePage{
 		Accounts: out,
-		HasMore:  len(ids) == options.Limit,
+		HasMore:  len(ids) == limit,
 	}
 	if len(ids) > 0 {
 		page.NextAfterID = ids[len(ids)-1]
 	}
 	return page, nil
 }
+
 
 func (r *accountRepository) ListByPlatform(ctx context.Context, platform string) ([]service.Account, error) {
 	accounts, err := r.client.Account.Query().

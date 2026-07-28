@@ -218,6 +218,23 @@ Nginx drops headers containing underscores by default (e.g. `session_id`), which
 
 ## Deployment
 
+### Method 0: DIY Single Binary (no PostgreSQL / Redis)
+
+For personal / small-team / internal use: **one binary, SQLite WAL, embedded Redis, embedded Web UI, port 8080 only**.
+
+- Guide (English): [README_DIY.md](README_DIY.md)
+- Guide (中文): [README_DIY_CN.md](README_DIY_CN.md)
+- Config samples: `deploy/diy/`
+- CI builds multi-platform packages on every push to the **`diy`** branch (workflow **DIY Release**)
+- systemd: `deploy/diy/install-systemd.sh` + `deploy/diy/sub2api.service`
+
+```bash
+export DEPLOY_MODE=diy
+export AUTO_SETUP=true
+./sub2api
+# → http://127.0.0.1:8080
+```
+
 ### Method 1: Script Installation (Recommended)
 
 One-click installation script that downloads pre-built binaries from GitHub Releases.

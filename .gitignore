@@ -66,6 +66,8 @@ docker-compose.override.yml
 .project
 .settings/
 .classpath
+.codegraph/
+_diy_warn/
 
 # ===================
 # 操作系统
@@ -143,3 +145,8 @@ docs/*
 frontend/coverage/
 aicodex
 output/
+
+# DIY smoke / local agent state
+.omc/
+_diy_*/
+

@@ -427,8 +427,12 @@ func ProvideOpsCleanupService(
 	return svc
 }
 
-func ProvideOpsSystemLogSink(opsRepo OpsRepository) *OpsSystemLogSink {
+func ProvideOpsSystemLogSink(opsRepo OpsRepository, cfg *config.Config) *OpsSystemLogSink {
 	sink := NewOpsSystemLogSink(opsRepo)
+	// COPY-based bulk flush is PostgreSQL-specific; skip on DIY/SQLite or when ops is hard-disabled.
+	if cfg != nil && (cfg.IsDIY() || !cfg.Ops.Enabled) {
+		return sink
+	}
 	sink.Start()
 	logger.SetSink(sink)
 	return sink

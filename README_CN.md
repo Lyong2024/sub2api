@@ -220,6 +220,23 @@ Nginx 默认会丢弃名称中含下划线的请求头（如 `session_id`），�
 
 ## 部署方式
 
+### 方式零：DIY 单二进制（无需 PostgreSQL / Redis）
+
+适合个人 / 小团队 / 内网：**一个二进制文件、SQLite WAL、进程内 Redis、内嵌 Web UI，只暴露 8080**。
+
+- 中文说明：[README_DIY_CN.md](README_DIY_CN.md)
+- English：[README_DIY.md](README_DIY.md)
+- 配置示例：`deploy/diy/`
+- **每次推送到 `diy` 分支** 触发 GitHub Actions（**DIY Release**）自动构建多平台二进制
+- systemd 开机自启：`deploy/diy/install-systemd.sh` + `deploy/diy/sub2api.service`
+
+```bash
+export DEPLOY_MODE=diy
+export AUTO_SETUP=true
+./sub2api
+# → http://127.0.0.1:8080
+```
+
 ### 方式一：脚本安装（推荐）
 
 一键安装脚本，自动从 GitHub Releases 下载预编译的二进制文件。

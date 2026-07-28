@@ -21,6 +21,19 @@ import (
 const (
 	RunModeStandard = "standard"
 	RunModeSimple   = "simple"
+
+	// DeployModeStandard keeps the classic PostgreSQL + external Redis topology.
+	DeployModeStandard = "standard"
+	// DeployModeDIY is the single-binary layout: SQLite (WAL) + embedded Redis, port 8080 only.
+	DeployModeDIY = "diy"
+
+	// DatabaseDriverPostgres is the production driver.
+	DatabaseDriverPostgres = "postgres"
+	// DatabaseDriverSQLite is the DIY / single-node driver (modernc.org/sqlite, no CGO).
+	DatabaseDriverSQLite = "sqlite"
+
+	// DefaultSQLitePath is used when deploy_mode=diy and database.path is empty.
+	DefaultSQLitePath = "./data/sub2api.db"
 )
 
 // 使用量记录队列溢出策略
@@ -92,12 +105,25 @@ type Config struct {
 	Concurrency             ConcurrencyConfig             `mapstructure:"concurrency"`
 	TokenRefresh            TokenRefreshConfig            `mapstructure:"token_refresh"`
 	RunMode                 string                        `mapstructure:"run_mode" yaml:"run_mode"`
+	// DeployMode selects topology: "standard" (Postgres+Redis) or "diy" (SQLite WAL + embedded Redis).
+	DeployMode              string                        `mapstructure:"deploy_mode" yaml:"deploy_mode"`
 	Timezone                string                        `mapstructure:"timezone"` // e.g. "Asia/Shanghai", "UTC"
 	Gemini                  GeminiConfig                  `mapstructure:"gemini"`
 	Update                  UpdateConfig                  `mapstructure:"update"`
 	Idempotency             IdempotencyConfig             `mapstructure:"idempotency"`
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
+}
+
+// IsDIY returns true when the process should run as a single-binary DIY deployment.
+func (c *Config) IsDIY() bool {
+	if c == nil {
+		return false
+	}
+	if NormalizeDeployMode(c.DeployMode) == DeployModeDIY {
+		return true
+	}
+	return NormalizeDatabaseDriver(c.Database.Driver) == DatabaseDriverSQLite
 }
 
 type LogConfig struct {
@@ -1362,6 +1388,10 @@ func (s *ServerConfig) Address() string {
 // DatabaseConfig 数据库连接配置
 // 性能优化：新增连接池参数，避免频繁创建/销毁连接
 type DatabaseConfig struct {
+	// Driver selects the SQL dialect: "postgres" (default) or "sqlite".
+	Driver string `mapstructure:"driver"`
+	// Path is the SQLite database file path (used when Driver=sqlite).
+	Path string `mapstructure:"path"`
 	Host     string `mapstructure:"host"`
 	Port     int    `mapstructure:"port"`
 	User     string `mapstructure:"user"`
@@ -1384,6 +1414,34 @@ type DatabaseConfig struct {
 	// UserPlatformQuotaFlushBatchSize: flusher 单批最大条数
 	// 建议 ≤ 6000（单条 UPSERT 原子上限）
 	UserPlatformQuotaFlushBatchSize int `mapstructure:"user_platform_quota_flush_batch_size"`
+}
+
+// IsSQLite reports whether this config targets SQLite.
+func (d *DatabaseConfig) IsSQLite() bool {
+	if d == nil {
+		return false
+	}
+	return NormalizeDatabaseDriver(d.Driver) == DatabaseDriverSQLite
+}
+
+// SQLitePath returns the resolved on-disk path for the SQLite database file.
+func (d *DatabaseConfig) SQLitePath() string {
+	if d == nil {
+		return DefaultSQLitePath
+	}
+	path := strings.TrimSpace(d.Path)
+	if path == "" {
+		return DefaultSQLitePath
+	}
+	return path
+}
+
+// SQLiteDSN builds a modernc.org/sqlite DSN with foreign keys and busy timeout.
+// WAL is applied after open via PRAGMA (see repository.InitEnt).
+func (d *DatabaseConfig) SQLiteDSN() string {
+	path := d.SQLitePath()
+	// Use URI form so pragma query params work across drivers.
+	return fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
 }
 
 func (d *DatabaseConfig) DSN() string {
@@ -1421,6 +1479,9 @@ func (d *DatabaseConfig) DSNWithTimezone(tz string) string {
 // RedisConfig Redis 连接配置
 // 性能优化：新增连接池和超时参数，提升高并发场景下的吞吐量
 type RedisConfig struct {
+	// Embedded runs an in-process Redis-compatible server (miniredis) for DIY mode.
+	// When true, Host/Port/Password are ignored for outbound connections.
+	Embedded bool `mapstructure:"embedded"`
 	Host     string `mapstructure:"host"`
 	Port     int    `mapstructure:"port"`
 	Username string `mapstructure:"username"`
@@ -1615,6 +1676,26 @@ type UsageCleanupConfig struct {
 	TaskTimeoutSeconds int `mapstructure:"task_timeout_seconds"`
 }
 
+// NormalizeDeployMode normalizes deploy_mode values.
+func NormalizeDeployMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case DeployModeDIY, "standalone", "single", "sqlite":
+		return DeployModeDIY
+	default:
+		return DeployModeStandard
+	}
+}
+
+// NormalizeDatabaseDriver normalizes database.driver values.
+func NormalizeDatabaseDriver(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case DatabaseDriverSQLite, "sqlite3", "modernc":
+		return DatabaseDriverSQLite
+	default:
+		return DatabaseDriverPostgres
+	}
+}
+
 func NormalizeRunMode(value string) string {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	switch normalized {
@@ -1638,6 +1719,9 @@ func LoadForBootstrap() (*Config, error) {
 }
 
 func load(allowMissingJWTSecret bool) (*Config, error) {
+	// Load .env from the working directory (and DATA_DIR) so DIY can be configured without shell exports.
+	loadDotEnvFiles()
+
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
 	configureConfigSource(viper.SetConfigFile, viper.AddConfigPath)
@@ -1648,6 +1732,10 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	if err := viper.BindEnv("server.enable_server_timing", "ENABLE_SERVER_TIMING"); err != nil {
 		return nil, fmt.Errorf("bind ENABLE_SERVER_TIMING: %w", err)
 	}
+	_ = viper.BindEnv("deploy_mode", "DEPLOY_MODE")
+	_ = viper.BindEnv("database.driver", "DATABASE_DRIVER")
+	_ = viper.BindEnv("database.path", "DATABASE_PATH")
+	_ = viper.BindEnv("redis.embedded", "REDIS_EMBEDDED")
 
 	// 默认值
 	setDefaults()
@@ -1688,6 +1776,9 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	}
 
 	cfg.RunMode = NormalizeRunMode(cfg.RunMode)
+	cfg.DeployMode = NormalizeDeployMode(cfg.DeployMode)
+	cfg.Database.Driver = NormalizeDatabaseDriver(cfg.Database.Driver)
+	applyDIYDefaults(&cfg)
 	cfg.Server.Mode = strings.ToLower(strings.TrimSpace(cfg.Server.Mode))
 	if cfg.Server.Mode == "" {
 		cfg.Server.Mode = "debug"
@@ -1831,8 +1922,124 @@ func configureConfigSource(setConfigFile, addConfigPath func(string)) {
 	addConfigPath("/etc/sub2api")
 }
 
+// applyDIYDefaults forces SQLite + embedded Redis topology when deploy_mode=diy
+// or database.driver=sqlite. SQLite write concurrency is limited, so pool sizes are clamped.
+func applyDIYDefaults(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	diy := NormalizeDeployMode(cfg.DeployMode) == DeployModeDIY ||
+		NormalizeDatabaseDriver(cfg.Database.Driver) == DatabaseDriverSQLite
+	if !diy {
+		return
+	}
+	cfg.DeployMode = DeployModeDIY
+	cfg.Database.Driver = DatabaseDriverSQLite
+	if strings.TrimSpace(cfg.Database.Path) == "" {
+		cfg.Database.Path = DefaultSQLitePath
+	}
+	// Prefer single-connection SQLite access unless the operator raised the limit intentionally.
+	if cfg.Database.MaxOpenConns <= 0 || cfg.Database.MaxOpenConns > 8 {
+		cfg.Database.MaxOpenConns = 1
+	}
+	if cfg.Database.MaxIdleConns <= 0 || cfg.Database.MaxIdleConns > cfg.Database.MaxOpenConns {
+		cfg.Database.MaxIdleConns = cfg.Database.MaxOpenConns
+	}
+	// DIY always embeds Redis unless explicitly forced off via REDIS_EMBEDDED=false
+	// after a non-empty host was intended for an external instance.
+	if !viper.IsSet("redis.embedded") {
+		cfg.Redis.Embedded = true
+	}
+	if cfg.Redis.Embedded {
+		// Keep pool tiny — everything is in-process.
+		if cfg.Redis.PoolSize > 64 || cfg.Redis.PoolSize <= 0 {
+			cfg.Redis.PoolSize = 16
+		}
+		if cfg.Redis.MinIdleConns > cfg.Redis.PoolSize {
+			cfg.Redis.MinIdleConns = 1
+		}
+	}
+	// Heavy ops/aggregation paths still contain PostgreSQL-only SQL.
+	// Disable by default on DIY; operators can re-enable later as dialect coverage grows.
+	if !viper.IsSet("ops.enabled") {
+		cfg.Ops.Enabled = false
+	}
+	if !viper.IsSet("dashboard_aggregation.enabled") {
+		cfg.DashboardAgg.Enabled = false
+	}
+	// Same-origin embedded UI: empty CORS is fine, but silence the hard warning by
+	// not forcing wildcards. Trusted proxies default to loopback for local DIY.
+	if !cfg.Server.TrustedProxiesConfigured && len(cfg.Server.TrustedProxies) == 0 {
+		cfg.Server.TrustedProxies = []string{"127.0.0.1/32", "::1/128"}
+		cfg.Server.TrustedProxiesConfigured = true
+	}
+	// Reuse JWT secret as TOTP encryption material when unset so install is one-key DIY.
+	if strings.TrimSpace(cfg.Totp.EncryptionKey) == "" && strings.TrimSpace(cfg.JWT.Secret) != "" {
+		// AES-256 key is 32 bytes hex-encoded (64 hex chars). Derive a stable hex key from JWT.
+		secret := []byte(strings.TrimSpace(cfg.JWT.Secret))
+		sum := make([]byte, 32)
+		// simple expand/truncate without importing crypto here beyond existing package deps
+		for i := 0; i < 32; i++ {
+			sum[i] = secret[i%len(secret)] ^ byte(i*17+3)
+		}
+		cfg.Totp.EncryptionKey = hex.EncodeToString(sum)
+		cfg.Totp.EncryptionKeyConfigured = true
+	}
+}
+
+// loadDotEnvFiles loads KEY=VALUE pairs from .env files without overriding
+// already-exported environment variables. Search order: DATA_DIR/.env, ./.env.
+func loadDotEnvFiles() {
+	candidates := make([]string, 0, 3)
+	if dataDir := strings.TrimSpace(os.Getenv("DATA_DIR")); dataDir != "" {
+		candidates = append(candidates, strings.TrimRight(dataDir, `/\`)+string(os.PathSeparator)+".env")
+	}
+	candidates = append(candidates, ".env", "config/.env")
+	for _, path := range candidates {
+		_ = loadDotEnvFile(path)
+	}
+}
+
+func loadDotEnvFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		if len(val) >= 2 {
+			if (val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'') {
+				val = val[1 : len(val)-1]
+			}
+		}
+		// Do not override existing environment variables.
+		if _, exists := os.LookupEnv(key); exists {
+			continue
+		}
+		_ = os.Setenv(key, val)
+	}
+	return nil
+}
+
 func setDefaults() {
 	viper.SetDefault("run_mode", RunModeStandard)
+	viper.SetDefault("deploy_mode", DeployModeStandard)
 
 	// Server
 	viper.SetDefault("server.host", "0.0.0.0")
@@ -1988,6 +2195,8 @@ func setDefaults() {
 	viper.SetDefault("dingtalk_connect.username_overwrite_policy", "if_empty")
 
 	// Database
+	viper.SetDefault("database.driver", DatabaseDriverPostgres)
+	viper.SetDefault("database.path", DefaultSQLitePath)
 	viper.SetDefault("database.host", "localhost")
 	viper.SetDefault("database.port", 5432)
 	viper.SetDefault("database.user", "postgres")
@@ -2003,6 +2212,7 @@ func setDefaults() {
 	viper.SetDefault("database.user_platform_quota_flush_batch_size", 1000)
 
 	// Redis
+	viper.SetDefault("redis.embedded", false)
 	viper.SetDefault("redis.host", "localhost")
 	viper.SetDefault("redis.port", 6379)
 	viper.SetDefault("redis.username", "")

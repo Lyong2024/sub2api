@@ -1,4 +1,4 @@
-.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical
+.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical diy-build diy-run
 
 FRONTEND_CRITICAL_VITEST := \
 	src/views/auth/__tests__/LinuxDoCallbackView.spec.ts \
@@ -18,6 +18,16 @@ build-backend:
 # 编译前端（需要已安装依赖）
 build-frontend:
 	@pnpm --dir frontend run build
+
+# DIY 单二进制：前端 embed + CGO 关闭
+diy-build: build-frontend
+	@mkdir -p dist
+	@cd backend && CGO_ENABLED=0 go build -tags embed -ldflags="-s -w" -o ../dist/sub2api ./cmd/server
+	@echo "Built dist/sub2api (DIY embed binary)"
+
+# DIY 本地运行（SQLite WAL + 嵌入式 Redis，端口 8080）
+diy-run:
+	@DEPLOY_MODE=diy AUTO_SETUP=true SERVER_PORT=8080 ./dist/sub2api
 
 # 运行测试（后端 + 前端）
 test: test-backend test-frontend

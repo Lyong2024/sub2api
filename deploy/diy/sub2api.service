@@ -1,0 +1,31 @@
+[Unit]
+Description=Sub2API DIY (SQLite + embedded Redis + embedded Web UI)
+Documentation=https://github.com/Lyong2024/sub2api
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sub2api
+Group=sub2api
+WorkingDirectory=/opt/sub2api
+# Prefer environment file for secrets; falls back to working-dir .env / config.yaml
+EnvironmentFile=-/etc/sub2api/sub2api.env
+Environment=DEPLOY_MODE=diy
+Environment=AUTO_SETUP=true
+Environment=DATA_DIR=/var/lib/sub2api
+Environment=SERVER_HOST=0.0.0.0
+Environment=SERVER_PORT=8080
+ExecStart=/opt/sub2api/sub2api
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+# Hardening (safe defaults for a local reverse-proxy deployment)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/sub2api /opt/sub2api
+
+[Install]
+WantedBy=multi-user.target

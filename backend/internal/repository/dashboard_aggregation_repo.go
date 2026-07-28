@@ -33,7 +33,7 @@ func NewDashboardAggregationRepository(sqlDB *sql.DB) service.DashboardAggregati
 }
 
 func newDashboardAggregationRepositoryWithSQL(sqlq sqlExecutor) *dashboardAggregationRepository {
-	return &dashboardAggregationRepository{sql: sqlq}
+	return &dashboardAggregationRepository{sql: adaptSQLExecutor(sqlq)}
 }
 
 func isPostgresDriver(db *sql.DB) bool {

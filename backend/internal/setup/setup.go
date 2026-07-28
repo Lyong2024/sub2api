@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
@@ -84,6 +85,8 @@ type SetupConfig struct {
 }
 
 type DatabaseConfig struct {
+	Driver   string `json:"driver" yaml:"driver"`
+	Path     string `json:"path" yaml:"path"`
 	Host     string `json:"host" yaml:"host"`
 	Port     int    `json:"port" yaml:"port"`
 	User     string `json:"user" yaml:"user"`
@@ -93,12 +96,23 @@ type DatabaseConfig struct {
 }
 
 type RedisConfig struct {
+	Embedded  bool   `json:"embedded" yaml:"embedded"`
 	Host      string `json:"host" yaml:"host"`
 	Port      int    `json:"port" yaml:"port"`
 	Username  string `json:"username" yaml:"username"`
 	Password  string `json:"password" yaml:"password"`
 	DB        int    `json:"db" yaml:"db"`
 	EnableTLS bool   `json:"enable_tls" yaml:"enable_tls"`
+}
+
+// diyModeEnabled reports whether this process should bootstrap as DIY (SQLite + embedded Redis).
+func diyModeEnabled() bool {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("DEPLOY_MODE")))
+	if mode == "diy" || mode == "standalone" || mode == "single" {
+		return true
+	}
+	driver := strings.ToLower(strings.TrimSpace(os.Getenv("DATABASE_DRIVER")))
+	return driver == "sqlite" || driver == "sqlite3"
 }
 
 type AdminConfig struct {
@@ -337,6 +351,21 @@ func createInstallLock() error {
 }
 
 func initializeDatabase(cfg *SetupConfig) error {
+	if isSQLiteSetup(cfg) {
+		// Schema bootstrap is performed by repository.InitEnt on first server start.
+		// Here we only ensure the parent directory exists for the SQLite file.
+		path := strings.TrimSpace(cfg.Database.Path)
+		if path == "" {
+			path = config.DefaultSQLitePath
+		}
+		if dir := filepathDir(path); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return fmt.Errorf("create sqlite dir: %w", err)
+			}
+		}
+		return nil
+	}
+
 	dsn := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Database.Host, cfg.Database.Port, cfg.Database.User,
@@ -359,6 +388,23 @@ func initializeDatabase(cfg *SetupConfig) error {
 	return repository.ApplyMigrations(migrationCtx, db)
 }
 
+func isSQLiteSetup(cfg *SetupConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	driver := strings.ToLower(strings.TrimSpace(cfg.Database.Driver))
+	return driver == "sqlite" || driver == "sqlite3" || diyModeEnabled()
+}
+
+func filepathDir(path string) string {
+	path = strings.ReplaceAll(path, "\\", "/")
+	i := strings.LastIndex(path, "/")
+	if i <= 0 {
+		return "."
+	}
+	return path[:i]
+}
+
 func (cfg *SetupConfig) migrationTimeout() time.Duration {
 	if cfg != nil && cfg.MigrationTimeoutSeconds > 0 {
 		return time.Duration(cfg.MigrationTimeoutSeconds) * time.Second
@@ -367,6 +413,10 @@ func (cfg *SetupConfig) migrationTimeout() time.Duration {
 }
 
 func createAdminUser(cfg *SetupConfig) (bool, string, error) {
+	if isSQLiteSetup(cfg) {
+		return createAdminUserSQLite(cfg)
+	}
+
 	dsn := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Database.Host, cfg.Database.Port, cfg.Database.User,
@@ -444,6 +494,78 @@ func createAdminUser(cfg *SetupConfig) (bool, string, error) {
 	return true, decision.reason, nil
 }
 
+// createAdminUserSQLite bootstraps the SQLite schema (Ent Create + WAL) and inserts the admin user.
+// Full InitEnt/Validate is intentionally avoided here so install can finish before the main server starts.
+func createAdminUserSQLite(cfg *SetupConfig) (bool, string, error) {
+	path := strings.TrimSpace(cfg.Database.Path)
+	if path == "" {
+		path = config.DefaultSQLitePath
+	}
+	if dir := filepathDir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return false, "", fmt.Errorf("create sqlite dir: %w", err)
+		}
+	}
+
+	client, cleanup, err := repository.OpenSQLiteForSetup(path)
+	if err != nil {
+		return false, "", err
+	}
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	totalUsers, err := client.User.Query().Count(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	adminUsers, err := client.User.Query().Where(user.RoleEQ(service.RoleAdmin)).Count(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	decision := decideAdminBootstrap(int64(totalUsers), int64(adminUsers))
+	if !decision.shouldCreate {
+		return false, decision.reason, nil
+	}
+
+	if strings.TrimSpace(cfg.Admin.Password) == "" {
+		password, genErr := generateSecret(16)
+		if genErr != nil {
+			return false, "", fmt.Errorf("failed to generate admin password: %w", genErr)
+		}
+		cfg.Admin.Password = password
+		fmt.Printf("Generated admin password (one-time): %s\n", cfg.Admin.Password)
+		fmt.Println("IMPORTANT: Save this password! It will not be shown again.")
+	}
+
+	admin := &service.User{
+		Email:       cfg.Admin.Email,
+		Role:        service.RoleAdmin,
+		Status:      service.StatusActive,
+		Balance:     0,
+		Concurrency: setupDefaultAdminConcurrency(),
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+	if err := admin.SetPassword(cfg.Admin.Password); err != nil {
+		return false, "", err
+	}
+
+	_, err = client.User.Create().
+		SetEmail(admin.Email).
+		SetPasswordHash(admin.PasswordHash).
+		SetRole(admin.Role).
+		SetBalance(admin.Balance).
+		SetConcurrency(admin.Concurrency).
+		SetStatus(admin.Status).
+		Save(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	return true, decision.reason, nil
+}
+
 func writeConfigFile(cfg *SetupConfig) error {
 	// Ensure timezone has a default value
 	tz := cfg.Timezone
@@ -451,12 +573,25 @@ func writeConfigFile(cfg *SetupConfig) error {
 		tz = "Asia/Shanghai"
 	}
 
+	deployMode := "standard"
+	if isSQLiteSetup(cfg) {
+		deployMode = "diy"
+		if strings.TrimSpace(cfg.Database.Driver) == "" {
+			cfg.Database.Driver = "sqlite"
+		}
+		if strings.TrimSpace(cfg.Database.Path) == "" {
+			cfg.Database.Path = config.DefaultSQLitePath
+		}
+		cfg.Redis.Embedded = true
+	}
+
 	// Prepare config for YAML (exclude sensitive data and admin config)
 	yamlConfig := struct {
-		Server   ServerConfig   `yaml:"server"`
-		Database DatabaseConfig `yaml:"database"`
-		Redis    RedisConfig    `yaml:"redis"`
-		JWT      struct {
+		DeployMode string         `yaml:"deploy_mode"`
+		Server     ServerConfig   `yaml:"server"`
+		Database   DatabaseConfig `yaml:"database"`
+		Redis      RedisConfig    `yaml:"redis"`
+		JWT        struct {
 			Secret     string `yaml:"secret"`
 			ExpireHour int    `yaml:"expire_hour"`
 		} `yaml:"jwt"`
@@ -470,11 +605,18 @@ func writeConfigFile(cfg *SetupConfig) error {
 			RequestsPerMinute int `yaml:"requests_per_minute"`
 			BurstSize         int `yaml:"burst_size"`
 		} `yaml:"rate_limit"`
+		Ops struct {
+			Enabled bool `yaml:"enabled"`
+		} `yaml:"ops"`
+		DashboardAggregation struct {
+			Enabled bool `yaml:"enabled"`
+		} `yaml:"dashboard_aggregation"`
 		Timezone string `yaml:"timezone"`
 	}{
-		Server:   cfg.Server,
-		Database: cfg.Database,
-		Redis:    cfg.Redis,
+		DeployMode: deployMode,
+		Server:     cfg.Server,
+		Database:   cfg.Database,
+		Redis:      cfg.Redis,
 		JWT: struct {
 			Secret     string `yaml:"secret"`
 			ExpireHour int    `yaml:"expire_hour"`
@@ -500,6 +642,13 @@ func writeConfigFile(cfg *SetupConfig) error {
 			RequestsPerMinute: 60,
 			BurstSize:         10,
 		},
+		// DIY defaults: disable PG-heavy ops/aggregation until dialect coverage expands.
+		Ops: struct {
+			Enabled bool `yaml:"enabled"`
+		}{Enabled: deployMode != "diy"},
+		DashboardAggregation: struct {
+			Enabled bool `yaml:"enabled"`
+		}{Enabled: deployMode != "diy"},
 		Timezone: tz,
 	}
 
@@ -523,10 +672,18 @@ func generateSecret(length int) (string, error) {
 // Auto Setup for Docker Deployment
 // =============================================================================
 
-// AutoSetupEnabled checks if auto setup is enabled via environment variable
+// AutoSetupEnabled checks if auto setup is enabled via environment variable.
+// DIY mode defaults to auto setup so a single binary can start without the wizard.
 func AutoSetupEnabled() bool {
 	val := os.Getenv("AUTO_SETUP")
-	return val == "true" || val == "1" || val == "yes"
+	if val == "true" || val == "1" || val == "yes" {
+		return true
+	}
+	if val == "false" || val == "0" || val == "no" {
+		return false
+	}
+	// Default on for DIY so operators only need the binary + optional .env.
+	return diyModeEnabled()
 }
 
 // getEnvOrDefault gets environment variable or returns default value
@@ -548,7 +705,8 @@ func getEnvIntOrDefault(key string, defaultValue int) int {
 }
 
 // AutoSetupFromEnv performs automatic setup using environment variables
-// This is designed for Docker deployment where all config is passed via env vars
+// This is designed for Docker deployment where all config is passed via env vars.
+// DIY mode uses SQLite + embedded Redis and skips external connectivity checks.
 func AutoSetupFromEnv() error {
 	logger.LegacyPrintf("setup", "%s", "Auto setup enabled, configuring from environment variables...")
 	logger.LegacyPrintf("setup", "Data directory: %s", GetDataDir())
@@ -559,9 +717,21 @@ func AutoSetupFromEnv() error {
 		tz = getEnvOrDefault("TIMEZONE", "Asia/Shanghai")
 	}
 
+	diy := diyModeEnabled()
+	sqlitePath := getEnvOrDefault("DATABASE_PATH", "")
+	if sqlitePath == "" {
+		// Prefer data dir for DIY so all state lives under one volume.
+		sqlitePath = GetDataDir() + "/sub2api.db"
+		if diy {
+			sqlitePath = strings.ReplaceAll(sqlitePath, "\\", "/")
+		}
+	}
+
 	// Build config from environment variables
 	cfg := &SetupConfig{
 		Database: DatabaseConfig{
+			Driver:   getEnvOrDefault("DATABASE_DRIVER", map[bool]string{true: "sqlite", false: "postgres"}[diy]),
+			Path:     sqlitePath,
 			Host:     getEnvOrDefault("DATABASE_HOST", "localhost"),
 			Port:     getEnvIntOrDefault("DATABASE_PORT", 5432),
 			User:     getEnvOrDefault("DATABASE_USER", "postgres"),
@@ -570,6 +740,7 @@ func AutoSetupFromEnv() error {
 			SSLMode:  getEnvOrDefault("DATABASE_SSLMODE", "disable"),
 		},
 		Redis: RedisConfig{
+			Embedded:  diy || getEnvOrDefault("REDIS_EMBEDDED", "false") == "true",
 			Host:      getEnvOrDefault("REDIS_HOST", "localhost"),
 			Port:      getEnvIntOrDefault("REDIS_PORT", 6379),
 			Username:  getEnvOrDefault("REDIS_USERNAME", ""),
@@ -593,6 +764,10 @@ func AutoSetupFromEnv() error {
 		Timezone:                tz,
 		MigrationTimeoutSeconds: getEnvIntOrDefault("SETUP_MIGRATION_TIMEOUT_SECONDS", 0),
 	}
+	if diy {
+		cfg.Database.Driver = "sqlite"
+		cfg.Redis.Embedded = true
+	}
 
 	// Generate JWT secret if not provided
 	if cfg.JWT.Secret == "" {
@@ -604,19 +779,26 @@ func AutoSetupFromEnv() error {
 		logger.LegacyPrintf("setup", "%s", "Warning: JWT secret auto-generated. Consider setting a fixed secret for production.")
 	}
 
-	// Test database connection
-	logger.LegacyPrintf("setup", "%s", "Testing database connection...")
-	if err := TestDatabaseConnection(&cfg.Database); err != nil {
-		return fmt.Errorf("database connection failed: %w", err)
-	}
-	logger.LegacyPrintf("setup", "%s", "Database connection successful")
+	if diy {
+		logger.LegacyPrintf("setup", "%s", "DIY mode: SQLite + embedded Redis (no external dependencies)")
+		if err := ensureDataDir(); err != nil {
+			return err
+		}
+	} else {
+		// Test database connection
+		logger.LegacyPrintf("setup", "%s", "Testing database connection...")
+		if err := TestDatabaseConnection(&cfg.Database); err != nil {
+			return fmt.Errorf("database connection failed: %w", err)
+		}
+		logger.LegacyPrintf("setup", "%s", "Database connection successful")
 
-	// Test Redis connection
-	logger.LegacyPrintf("setup", "%s", "Testing Redis connection...")
-	if err := TestRedisConnection(&cfg.Redis); err != nil {
-		return fmt.Errorf("redis connection failed: %w", err)
+		// Test Redis connection
+		logger.LegacyPrintf("setup", "%s", "Testing Redis connection...")
+		if err := TestRedisConnection(&cfg.Redis); err != nil {
+			return fmt.Errorf("redis connection failed: %w", err)
+		}
+		logger.LegacyPrintf("setup", "%s", "Redis connection successful")
 	}
-	logger.LegacyPrintf("setup", "%s", "Redis connection successful")
 
 	// Initialize database
 	logger.LegacyPrintf("setup", "%s", "Initializing database...")
@@ -633,6 +815,9 @@ func AutoSetupFromEnv() error {
 	}
 	if created {
 		logger.LegacyPrintf("setup", "Admin user created: %s", cfg.Admin.Email)
+		if strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")) == "" {
+			logger.LegacyPrintf("setup", "Admin password (auto-generated): %s", cfg.Admin.Password)
+		}
 	} else {
 		switch reason {
 		case adminBootstrapReasonAdminExists:
@@ -659,4 +844,14 @@ func AutoSetupFromEnv() error {
 
 	logger.LegacyPrintf("setup", "%s", "Auto setup completed successfully!")
 	return nil
+}
+
+func ensureDataDir() error {
+	dir := GetDataDir()
+	if dir == "" || dir == "." {
+		// Still ensure ./data for default sqlite path when using data/sub2api.db
+		_ = os.MkdirAll("data", 0o755)
+		return nil
+	}
+	return os.MkdirAll(dir, 0o755)
 }

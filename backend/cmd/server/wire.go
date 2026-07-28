@@ -347,6 +347,10 @@ func provideCleanup(
 				}
 				return rdb.Close()
 			}},
+			{"EmbeddedRedis", func() error {
+				repository.CloseEmbeddedRedis()
+				return nil
+			}},
 			{"Ent", func() error {
 				if entClient == nil {
 					return nil

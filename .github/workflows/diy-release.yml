@@ -1,0 +1,174 @@
+name: DIY Release
+
+# 每次推送到 diy 分支或打 diy-v* tag 时，自动构建多平台单二进制（内嵌前端 + SQLite DIY）。
+on:
+  push:
+    branches:
+      - diy
+    tags:
+      - 'diy-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label for artifacts (e.g. 1.0.0-diy)'
+        required: false
+        default: 'snapshot'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install & build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist
+          path: backend/internal/web/dist/
+          retention-days: 3
+
+  build-binaries:
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ''
+          - goos: linux
+            goarch: arm64
+            ext: ''
+          - goos: windows
+            goarch: amd64
+            ext: '.exe'
+          - goos: darwin
+            goarch: amd64
+            ext: ''
+          - goos: darwin
+            goarch: arm64
+            ext: ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: backend/internal/web/dist/
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            V="${GITHUB_REF#refs/tags/}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.version }}" ]]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="diy-${GITHUB_SHA::8}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        working-directory: backend
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p ../dist
+          OUT="sub2api_${{ steps.ver.outputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}"
+          go build -tags embed \
+            -ldflags="-s -w -X main.Version=${{ steps.ver.outputs.version }} -X main.Commit=${{ steps.ver.outputs.commit }} -X main.BuildType=release" \
+            -o "../dist/${OUT}" \
+            ./cmd/server
+          echo "BINARY=${OUT}" >> "$GITHUB_ENV"
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p package
+          cp "dist/${BINARY}" package/sub2api${{ matrix.ext }}
+          cp deploy/diy/config.example.yaml package/
+          cp deploy/diy/.env.example package/
+          cp deploy/diy/sub2api.service package/ 2>/dev/null || true
+          cp deploy/diy/install-systemd.sh package/ 2>/dev/null || true
+          cp README_DIY.md package/ 2>/dev/null || true
+          cp README_DIY_CN.md package/ 2>/dev/null || true
+          cd package
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            zip -r "../dist/${BINARY%.exe}.zip" .
+          else
+            tar -czf "../dist/${BINARY}.tar.gz" .
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sub2api-diy-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/diy-v')
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: sub2api-diy-*
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: DIY ${{ github.ref_name }}
+          body: |
+            Sub2API **DIY** 单二进制发布（SQLite WAL + 嵌入式 Redis + 内嵌 Web UI）。
+
+            仅需暴露 **8080**。详见 `README_DIY.md` / `README_DIY_CN.md`。
+
+            ```bash
+            export DEPLOY_MODE=diy
+            ./sub2api
+            ```
+          files: |
+            artifacts/**
+          generate_release_notes: true

@@ -1,0 +1,57 @@
+# Sub2API DIY 配置示例
+# 复制为 ./config.yaml 或 $DATA_DIR/config.yaml 后启动二进制即可
+#
+# 特点：
+# - SQLite WAL 本地文件，无需 PostgreSQL
+# - 进程内 Redis（miniredis），无需外部 Redis
+# - 默认只监听 8080（API + 内嵌 Web UI）
+
+deploy_mode: diy
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  mode: "release"
+
+# standard = 完整 SaaS 计费；simple = 跳过余额/计费校验（内网更省事）
+run_mode: "standard"
+
+database:
+  driver: sqlite
+  path: "./data/sub2api.db"
+  # SQLite 写串行，保持小连接池
+  max_open_conns: 1
+  max_idle_conns: 1
+  conn_max_lifetime_minutes: 30
+  conn_max_idle_time_minutes: 5
+
+redis:
+  embedded: true
+
+jwt:
+  # 至少 32 字节；首次安装也可留空由程序自动生成并写入
+  secret: "change-this-to-a-secure-random-string-32b"
+  expire_hour: 24
+
+timezone: "Asia/Shanghai"
+
+default:
+  user_concurrency: 5
+  user_balance: 0
+  api_key_prefix: "sk-"
+  rate_multiplier: 1.0
+
+rate_limit:
+  requests_per_minute: 60
+  burst_size: 10
+
+# DIY 默认关闭依赖 PostgreSQL 专用 SQL 的运维聚合；网关与管理功能不受影响
+ops:
+  enabled: false
+
+dashboard_aggregation:
+  enabled: false
+
+log:
+  level: "info"
+  format: "console"

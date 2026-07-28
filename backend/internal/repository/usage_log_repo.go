@@ -156,7 +156,7 @@ func NewUsageLogRepository(client *dbent.Client, sqlDB *sql.DB) service.UsageLog
 
 func newUsageLogRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor) *usageLogRepository {
 	// 使用 scanSingleRow 替代 QueryRowContext，保证 ent.Tx 作为 sqlExecutor 可用。
-	repo := &usageLogRepository{client: client, sql: sqlq}
+	repo := &usageLogRepository{client: client, sql: adaptSQLExecutor(sqlq)}
 	if db, ok := sqlq.(*sql.DB); ok {
 		repo.db = db
 	}

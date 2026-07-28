@@ -39,7 +39,7 @@ func NewAdminGroupRepository(client *dbent.Client, sqlDB *sql.DB) service.AdminG
 }
 
 func newGroupRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor) *groupRepository {
-	return &groupRepository{client: client, sql: sqlq}
+	return &groupRepository{client: client, sql: adaptSQLExecutor(sqlq)}
 }
 
 func (r *groupRepository) Create(ctx context.Context, groupIn *service.Group) error {

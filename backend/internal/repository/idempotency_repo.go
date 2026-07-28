@@ -15,7 +15,7 @@ type idempotencyRepository struct {
 }
 
 func NewIdempotencyRepository(_ *dbent.Client, sqlDB *sql.DB) service.IdempotencyRepository {
-	return &idempotencyRepository{sql: sqlDB}
+	return &idempotencyRepository{sql: adaptSQLExecutor(sqlDB)}
 }
 
 func (r *idempotencyRepository) CreateProcessing(ctx context.Context, record *service.IdempotencyRecord) (bool, error) {

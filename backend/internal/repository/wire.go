@@ -194,6 +194,7 @@ func ProvideImageStorageFactory() service.ImageStorageFactory {
 // 设计说明：
 //   - Ent 底层使用 sql.DB，通过 Driver 接口可以访问
 //   - 这种设计允许在同一事务中混用 Ent 和原生 SQL
+//   - DIY/SQLite 下返回的 *sql.DB 仍是真实连接；方言重写在具体 repo 分支完成
 //
 // 依赖：*ent.Client
 // 提供：*sql.DB

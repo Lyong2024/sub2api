@@ -15,7 +15,7 @@ type userGroupRateRepository struct {
 
 // NewUserGroupRateRepository 创建用户专属分组倍率/RPM 仓储
 func NewUserGroupRateRepository(sqlDB *sql.DB) service.UserGroupRateRepository {
-	return &userGroupRateRepository{sql: sqlDB}
+	return &userGroupRateRepository{sql: adaptSQLExecutor(sqlDB)}
 }
 
 // GetByUserID 获取用户所有专属分组 rate_multiplier（仅返回非 NULL 的条目）

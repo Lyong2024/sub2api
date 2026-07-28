@@ -22,7 +22,7 @@ type batchImageRepository struct {
 }
 
 func NewBatchImageRepository(db *sql.DB) service.BatchImageRepository {
-	return &batchImageRepository{db: db, sql: db}
+	return &batchImageRepository{db: db, sql: adaptBatchImageSQL(db)}
 }
 
 func (r *batchImageRepository) CreateBatchImageJob(ctx context.Context, params service.CreateBatchImageJobParams) (*service.BatchImageJob, error) {

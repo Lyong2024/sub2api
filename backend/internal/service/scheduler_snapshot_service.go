@@ -179,7 +179,8 @@ func (s *SchedulerSnapshotService) Start() {
 	}()
 
 	interval := s.outboxPollInterval()
-	if s.outboxRepo != nil && interval > 0 {
+	// DIY/SQLite does not support FOR UPDATE SKIP LOCKED outbox claims; rely on full rebuild.
+	if s.outboxRepo != nil && interval > 0 && (s.cfg == nil || !s.cfg.IsDIY()) {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()

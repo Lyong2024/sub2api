@@ -6,6 +6,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
@@ -16,14 +20,16 @@ import (
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/lib/pq"
+
+	_ "modernc.org/sqlite"
 )
 
 // InitEnt 初始化 Ent ORM 客户端并返回客户端实例和底层的 *sql.DB。
 //
 // 该函数执行以下操作：
 //  1. 初始化全局时区设置，确保时间处理一致性
-//  2. 建立 PostgreSQL 数据库连接
-//  3. 自动执行数据库迁移，确保 schema 与代码同步
+//  2. 建立 PostgreSQL 或 SQLite 数据库连接
+//  3. 自动执行数据库迁移 / DIY schema bootstrap，确保 schema 与代码同步
 //  4. 创建并返回 Ent 客户端实例
 //
 // 重要提示：调用者必须负责关闭返回的 ent.Client（关闭时会自动关闭底层的 driver/db）。
@@ -42,6 +48,14 @@ func InitEnt(cfg *config.Config) (*ent.Client, *sql.DB, error) {
 		return nil, nil, err
 	}
 
+	if cfg.IsDIY() || cfg.Database.IsSQLite() {
+		return initEntSQLite(cfg)
+	}
+	return initEntPostgres(cfg)
+}
+
+func initEntPostgres(cfg *config.Config) (*ent.Client, *sql.DB, error) {
+	SetActiveDialect(DialectPostgres)
 	// 构建包含时区信息的数据库连接字符串 (DSN)。
 	// 时区信息会传递给 PostgreSQL，确保数据库层面的时间处理正确。
 	dsn := cfg.Database.DSNWithTimezone(cfg.Timezone)
@@ -74,11 +88,147 @@ func InitEnt(cfg *config.Config) (*ent.Client, *sql.DB, error) {
 		return nil, nil, err
 	}
 
+	return finalizeEntClient(migrationCtx, drv, cfg)
+}
+
+func initEntSQLite(cfg *config.Config) (*ent.Client, *sql.DB, error) {
+	SetActiveDialect(DialectSQLite)
+	path := cfg.Database.SQLitePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, nil, fmt.Errorf("create sqlite data dir: %w", err)
+	}
+
+	// Register PostgreSQL-compatible helpers (NOW, etc.) once per process for modernc.
+	registerSQLiteCompatFunctions()
+
+	// modernc driver name is "sqlite" (not "sqlite3").
+	db, err := sql.Open("sqlite", cfg.Database.SQLiteDSN())
+	if err != nil {
+		return nil, nil, fmt.Errorf("open sqlite: %w", err)
+	}
+
+	// Apply WAL and other pragmas on every connection-bearing open.
+	if err := configureSQLiteWAL(db); err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+
+	// SQLite writers serialize; keep pool tiny for correctness.
+	applyDBPoolSettings(db, cfg)
+
+	drv := entsql.OpenDB(dialect.SQLite, db)
+
+	migrationCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// DIY schema source of truth: Ent models (not the PostgreSQL migration history).
+	if err := bootstrapSQLiteSchema(migrationCtx, drv); err != nil {
+		_ = drv.Close()
+		return nil, nil, fmt.Errorf("sqlite schema bootstrap: %w", err)
+	}
+
+	log.Printf("sqlite database ready at %s (WAL mode)", path)
+	return finalizeEntClient(migrationCtx, drv, cfg)
+}
+
+// OpenSQLiteForSetup opens a SQLite database with WAL, runs Ent schema create, and
+// returns a client for one-shot install operations (admin bootstrap). Caller must run cleanup.
+func OpenSQLiteForSetup(path string) (*ent.Client, func(), error) {
+	if strings.TrimSpace(path) == "" {
+		path = config.DefaultSQLitePath
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil && filepath.Dir(path) != "." {
+		return nil, nil, fmt.Errorf("create sqlite data dir: %w", err)
+	}
+	SetActiveDialect(DialectSQLite)
+	registerSQLiteCompatFunctions()
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	if err := configureSQLiteWAL(db); err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	drv := entsql.OpenDB(dialect.SQLite, db)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := bootstrapSQLiteSchema(ctx, drv); err != nil {
+		_ = drv.Close()
+		return nil, nil, err
+	}
+	client := ent.NewClient(ent.Driver(drv))
+	cleanup := func() {
+		_ = client.Close()
+	}
+	return client, cleanup, nil
+}
+
+func configureSQLiteWAL(db *sql.DB) error {
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL;",
+		"PRAGMA busy_timeout=5000;",
+		"PRAGMA foreign_keys=ON;",
+		"PRAGMA synchronous=NORMAL;",
+		"PRAGMA temp_store=MEMORY;",
+	}
+	for _, p := range pragmas {
+		if _, err := db.Exec(p); err != nil {
+			return fmt.Errorf("exec %q: %w", p, err)
+		}
+	}
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode;").Scan(&mode); err != nil {
+		return fmt.Errorf("read journal_mode: %w", err)
+	}
+	if mode != "wal" {
+		return fmt.Errorf("expected journal_mode=wal, got %q", mode)
+	}
+	return nil
+}
+
+// bootstrapSQLiteSchema creates tables from Ent schema definitions and records a
+// synthetic migration marker so operators can see the DB was bootstrapped for DIY.
+func bootstrapSQLiteSchema(ctx context.Context, drv *entsql.Driver) error {
+	client := ent.NewClient(ent.Driver(drv))
+	// Do not close client here — it owns the shared driver used by the returned client.
+
+	if err := client.Schema.Create(ctx); err != nil {
+		return fmt.Errorf("ent schema create: %w", err)
+	}
+
+	// Track DIY bootstrap without replaying PostgreSQL migration files.
+	const ddl = `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+	filename   TEXT PRIMARY KEY,
+	checksum   TEXT NOT NULL,
+	applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);`
+	if _, err := drv.DB().ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("ensure schema_migrations: %w", err)
+	}
+	const marker = "diy_ent_bootstrap"
+	const checksum = "diy-ent-schema-v1"
+	_, err := drv.DB().ExecContext(ctx, `
+INSERT OR IGNORE INTO schema_migrations (filename, checksum, applied_at)
+VALUES (?, ?, datetime('now'))
+`, marker, checksum)
+	if err != nil {
+		return fmt.Errorf("record diy bootstrap: %w", err)
+	}
+	return nil
+}
+
+func finalizeEntClient(ctx context.Context, drv *entsql.Driver, cfg *config.Config) (*ent.Client, *sql.DB, error) {
 	// 创建 Ent 客户端，绑定到已配置的数据库驱动。
 	client := ent.NewClient(ent.Driver(drv))
 
 	// 启动阶段：从配置或数据库中确保系统密钥可用。
-	if err := ensureBootstrapSecrets(migrationCtx, client, cfg); err != nil {
+	if err := ensureBootstrapSecrets(ctx, client, cfg); err != nil {
 		_ = client.Close()
 		return nil, nil, err
 	}

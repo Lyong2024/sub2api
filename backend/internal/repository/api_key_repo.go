@@ -32,7 +32,7 @@ func NewAPIKeyRepository(client *dbent.Client, sqlDB *sql.DB) service.APIKeyRepo
 }
 
 func newAPIKeyRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor) *apiKeyRepository {
-	return &apiKeyRepository{client: client, sql: sqlq}
+	return &apiKeyRepository{client: client, sql: adaptSQLExecutor(sqlq)}
 }
 
 func (r *apiKeyRepository) activeQuery() *dbent.APIKeyQuery {

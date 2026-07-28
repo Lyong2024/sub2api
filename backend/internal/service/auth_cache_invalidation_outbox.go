@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+
 	"github.com/google/uuid"
 )
 
@@ -96,6 +98,7 @@ type AuthCacheInvalidationWorker struct {
 	processed atomic.Uint64
 	failures  atomic.Uint64
 	lastError atomic.Value
+	skipOutbox bool
 }
 
 func NewAuthCacheInvalidationWorker(repo AuthCacheInvalidationOutboxRepository, cache APIKeyCache, local ...*APIKeyService) *AuthCacheInvalidationWorker {
@@ -110,8 +113,19 @@ func NewAuthCacheInvalidationWorker(repo AuthCacheInvalidationOutboxRepository, 
 	return w
 }
 
+// DisableOutbox marks the worker as a no-op (used for DIY/SQLite where claim SQL is unsupported).
+func (w *AuthCacheInvalidationWorker) DisableOutbox() {
+	if w != nil {
+		w.skipOutbox = true
+	}
+}
+
 func (w *AuthCacheInvalidationWorker) Start() {
 	if w == nil || w.repo == nil || w.cache == nil {
+		return
+	}
+	// DIY/SQLite cannot claim outbox rows with FOR UPDATE SKIP LOCKED; pub/sub invalidation still works in-process.
+	if w.skipOutbox {
 		return
 	}
 	w.start.Do(func() {
@@ -286,8 +300,11 @@ func (w *AuthCacheInvalidationWorker) Health(ctx context.Context) AuthCacheInval
 	return health
 }
 
-func ProvideAuthCacheInvalidationWorker(repo AuthCacheInvalidationOutboxRepository, cache APIKeyCache, apiKeyService *APIKeyService) *AuthCacheInvalidationWorker {
+func ProvideAuthCacheInvalidationWorker(repo AuthCacheInvalidationOutboxRepository, cache APIKeyCache, apiKeyService *APIKeyService, cfg *config.Config) *AuthCacheInvalidationWorker {
 	worker := NewAuthCacheInvalidationWorker(repo, cache, apiKeyService)
+	if cfg != nil && cfg.IsDIY() {
+		worker.DisableOutbox()
+	}
 	worker.Start()
 	return worker
 }
