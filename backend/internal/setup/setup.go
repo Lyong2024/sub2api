@@ -177,16 +177,21 @@ func decideAdminBootstrap(totalUsers, adminUsers int64) adminBootstrapDecision {
 // NeedsSetup checks if the system needs initial setup
 // Uses multiple checks to prevent attackers from forcing re-setup by deleting config
 func NeedsSetup() bool {
-	// Check 1: Config file must not exist
-	if _, err := os.Stat(GetConfigFilePath()); !os.IsNotExist(err) {
-		return false // Config exists, no setup needed
-	}
-
-	// Check 2: Installation lock file (harder to bypass)
+	// Authoritative marker written only by a successful Install / AutoSetup.
 	if _, err := os.Stat(GetInstallLockPath()); !os.IsNotExist(err) {
-		return false // Lock file exists, already installed
+		return false
 	}
 
+	// Config alone used to mean "installed", but DIY packages shipped a sample
+	// config.yaml which skipped AutoSetup and left users empty. For DIY, require
+	// the lock file so first run still bootstraps SQLite + admin.
+	if diyModeEnabled() {
+		return true
+	}
+
+	if _, err := os.Stat(GetConfigFilePath()); !os.IsNotExist(err) {
+		return false
+	}
 	return true
 }
 
@@ -565,7 +570,7 @@ func createAdminUserSQLite(cfg *SetupConfig) (bool, string, error) {
 		return false, "", err
 	}
 
-	_, err = client.User.Create().
+	createdUser, err := client.User.Create().
 		SetEmail(admin.Email).
 		SetPasswordHash(admin.PasswordHash).
 		SetRole(admin.Role).
@@ -576,6 +581,7 @@ func createAdminUserSQLite(cfg *SetupConfig) (bool, string, error) {
 	if err != nil {
 		return false, "", err
 	}
+	logger.LegacyPrintf("setup", "Admin user persisted id=%d email=%s path=%s", createdUser.ID, admin.Email, path)
 	return true, decision.reason, nil
 }
 
@@ -733,10 +739,17 @@ func AutoSetupFromEnv() error {
 	diy := diyModeEnabled()
 	sqlitePath := getEnvOrDefault("DATABASE_PATH", "")
 	if sqlitePath == "" {
-		// Prefer data dir for DIY so all state lives under one volume.
-		sqlitePath = GetDataDir() + "/sub2api.db"
+		// Always use data/sub2api.db under DATA_DIR for DIY so setup and runtime match.
 		if diy {
+			base := GetDataDir()
+			if base == "" || base == "." {
+				sqlitePath = "data/sub2api.db"
+			} else {
+				sqlitePath = strings.TrimRight(base, `/\`) + "/data/sub2api.db"
+			}
 			sqlitePath = strings.ReplaceAll(sqlitePath, "\\", "/")
+		} else {
+			sqlitePath = GetDataDir() + "/sub2api.db"
 		}
 	}
 

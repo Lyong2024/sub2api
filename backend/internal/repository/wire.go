@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/Wei-Shaw/sub2api/ent"
@@ -173,7 +174,17 @@ var ProviderSet = wire.NewSet(
 // 提供：*ent.Client
 func ProvideEnt(cfg *config.Config) (*ent.Client, error) {
 	client, _, err := InitEnt(cfg)
-	return client, err
+	if err != nil {
+		return nil, err
+	}
+	// Heal empty DIY installs (sample config.yaml skipped AutoSetup).
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := EnsureDIYAdminUser(ctx, client, cfg); err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+	return client, nil
 }
 
 // ProvideImageStorageFactory 提供按需构造对象存储客户端的工厂。
