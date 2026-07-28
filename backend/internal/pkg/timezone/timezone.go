@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"log"
 	"time"
+	// Embed IANA tz database so Windows / minimal containers can resolve
+	// names like Asia/Shanghai (Go otherwise relies on host zoneinfo files).
+	_ "time/tzdata"
 )
 
 var (
@@ -26,7 +29,14 @@ func Init(tz string) error {
 
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
-		return fmt.Errorf("invalid timezone %q: %w", tz, err)
+		// Last-resort fallback for exotic hosts; prefer fixing zone name over hard-fail.
+		if fallback, ferr := time.LoadLocation("UTC"); ferr == nil {
+			log.Printf("WARNING: invalid timezone %q (%v); falling back to UTC", tz, err)
+			loc = fallback
+			tz = "UTC"
+		} else {
+			return fmt.Errorf("invalid timezone %q: %w", tz, err)
+		}
 	}
 
 	// Set the global Go time.Local to our timezone

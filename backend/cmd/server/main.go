@@ -14,6 +14,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	// Embed IANA timezone database so Windows DIY binaries can use
+	// zones like Asia/Shanghai without the host OS zoneinfo package.
+	_ "time/tzdata"
 
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"github.com/Wei-Shaw/sub2api/internal/config"
