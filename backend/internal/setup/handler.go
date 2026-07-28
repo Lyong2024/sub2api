@@ -40,13 +40,24 @@ func RegisterRoutes(r *gin.Engine) {
 type SetupStatus struct {
 	NeedsSetup bool   `json:"needs_setup"`
 	Step       string `json:"step"`
+	// DeployMode is "diy" (SQLite + embedded Redis) or "standard" (Postgres + Redis).
+	DeployMode string `json:"deploy_mode"`
+	// DIY is true when install should not require external Postgres/Redis.
+	DIY bool `json:"diy"`
 }
 
 // getStatus returns the current setup status
 func getStatus(c *gin.Context) {
+	diy := diyModeEnabled()
+	mode := "standard"
+	if diy {
+		mode = "diy"
+	}
 	response.Success(c, SetupStatus{
 		NeedsSetup: NeedsSetup(),
 		Step:       "welcome",
+		DeployMode: mode,
+		DIY:        diy,
 	})
 }
 

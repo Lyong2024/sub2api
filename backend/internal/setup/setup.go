@@ -106,13 +106,26 @@ type RedisConfig struct {
 }
 
 // diyModeEnabled reports whether this process should bootstrap as DIY (SQLite + embedded Redis).
+//
+// Explicit standard/postgres opts out. Missing env defaults to DIY so a double-clicked
+// Windows binary never asks for external PostgreSQL/Redis on first run.
 func diyModeEnabled() bool {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("DEPLOY_MODE")))
-	if mode == "diy" || mode == "standalone" || mode == "single" {
+	switch mode {
+	case "standard", "postgres", "postgresql", "full":
+		return false
+	case "diy", "standalone", "single", "sqlite":
 		return true
 	}
 	driver := strings.ToLower(strings.TrimSpace(os.Getenv("DATABASE_DRIVER")))
-	return driver == "sqlite" || driver == "sqlite3"
+	switch driver {
+	case "postgres", "postgresql":
+		return false
+	case "sqlite", "sqlite3":
+		return true
+	}
+	// Product default for this DIY distribution.
+	return true
 }
 
 type AdminConfig struct {

@@ -1987,9 +1987,12 @@ func applyDIYDefaults(cfg *Config) {
 	}
 }
 
-// loadDotEnvFiles loads KEY=VALUE pairs from .env files without overriding
+// LoadDotEnvFiles loads KEY=VALUE pairs from .env files without overriding
 // already-exported environment variables. Search order: DATA_DIR/.env, ./.env.
-func loadDotEnvFiles() {
+//
+// Must be called before setup.NeedsSetup / diy bootstrap so DEPLOY_MODE and
+// DATABASE_DRIVER from a local .env take effect on first run (Windows double-click).
+func LoadDotEnvFiles() {
 	candidates := make([]string, 0, 3)
 	if dataDir := strings.TrimSpace(os.Getenv("DATA_DIR")); dataDir != "" {
 		candidates = append(candidates, strings.TrimRight(dataDir, `/\`)+string(os.PathSeparator)+".env")
@@ -1999,6 +2002,9 @@ func loadDotEnvFiles() {
 		_ = loadDotEnvFile(path)
 	}
 }
+
+// Deprecated: use LoadDotEnvFiles.
+func loadDotEnvFiles() { LoadDotEnvFiles() }
 
 func loadDotEnvFile(path string) error {
 	data, err := os.ReadFile(path)
@@ -2039,7 +2045,8 @@ func loadDotEnvFile(path string) error {
 
 func setDefaults() {
 	viper.SetDefault("run_mode", RunModeStandard)
-	viper.SetDefault("deploy_mode", DeployModeStandard)
+	// DIY branch product default: SQLite + embedded Redis (override with DEPLOY_MODE=standard).
+	viper.SetDefault("deploy_mode", DeployModeDIY)
 
 	// Server
 	viper.SetDefault("server.host", "0.0.0.0")

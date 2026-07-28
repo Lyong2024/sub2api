@@ -147,12 +147,32 @@ jobs:
           set -euo pipefail
           mkdir -p package
           cp "dist/${BINARY}" "package/sub2api${{ matrix.ext }}"
-          cp deploy/diy/config.example.yaml package/
-          cp deploy/diy/.env.example package/
+          # Ready-to-run DIY defaults (SQLite + embedded Redis) — not only examples
+          cp deploy/diy/config.example.yaml package/config.example.yaml
+          cp deploy/diy/config.example.yaml package/config.yaml
+          cp deploy/diy/.env.example package/.env.example
+          cp deploy/diy/.env.example package/.env
           cp deploy/diy/sub2api.service package/ 2>/dev/null || true
           cp deploy/diy/install-systemd.sh package/ 2>/dev/null || true
           cp README_DIY.md package/ 2>/dev/null || true
           cp README_DIY_CN.md package/ 2>/dev/null || true
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            cat > package/start.bat <<'EOF'
+          @echo off
+          cd /d "%~dp0"
+          if not exist .env if exist .env.example copy /Y .env.example .env >nul
+          if not exist config.yaml if exist config.example.yaml copy /Y config.example.yaml config.yaml >nul
+          set DEPLOY_MODE=diy
+          set DATABASE_DRIVER=sqlite
+          set REDIS_EMBEDDED=true
+          set AUTO_SETUP=true
+          echo Starting Sub2API DIY (SQLite + embedded Redis) on http://127.0.0.1:8080 ...
+          sub2api.exe
+          pause
+          EOF
+            # Fix CRLF for Windows notepad/cmd friendliness
+            sed -i 's/$/\r/' package/start.bat 2>/dev/null || true
+          fi
           cd package
           if [[ "${{ matrix.goos }}" == "windows" ]]; then
             # sub2api-260728-windows-amd64.zip

@@ -66,6 +66,10 @@ func main() {
 		return
 	}
 
+	// Load .env before setup decisions so DEPLOY_MODE / DATABASE_DRIVER work on first run
+	// (especially Windows double-click next to a .env file).
+	config.LoadDotEnvFiles()
+
 	// CLI setup mode
 	if *setupMode {
 		if err := setup.RunCLI(); err != nil {
@@ -76,9 +80,10 @@ func main() {
 
 	// Check if setup is needed
 	if setup.NeedsSetup() {
-		// Check if auto-setup is enabled (for Docker deployment)
+		// DIY defaults to auto-setup (SQLite + embedded Redis) so operators never
+		// hit the Postgres/Redis wizard when launching a bare binary.
 		if setup.AutoSetupEnabled() {
-			log.Println("Auto setup mode enabled...")
+			log.Println("Auto setup mode enabled (DIY uses SQLite + embedded Redis)...")
 			if err := setup.AutoSetupFromEnv(); err != nil {
 				log.Fatalf("Auto setup failed: %v", err)
 			}
