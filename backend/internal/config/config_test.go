@@ -21,6 +21,10 @@ func resetViperWithJWTSecret(t *testing.T) {
 	t.Setenv("CONFIG_FILE", "")
 	t.Setenv("DATA_DIR", "")
 	t.Setenv("JWT_SECRET", strings.Repeat("x", 32))
+	// Unit tests assume standard topology defaults (empty trusted proxies, ops on, etc.).
+	// Product DIY default remains deploy_mode=diy when DEPLOY_MODE is unset outside tests.
+	t.Setenv("DEPLOY_MODE", "standard")
+	t.Setenv("DATABASE_DRIVER", "postgres")
 }
 
 func TestLoadServerTimingConfig(t *testing.T) {

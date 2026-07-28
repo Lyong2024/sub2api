@@ -162,27 +162,27 @@ func parseCLI(args []string) (*cliOptions, error) {
 	fs.SetOutput(io.Discard) // we print our own usage
 
 	var (
-		help          bool
-		version       bool
-		setupCLI      bool
-		autoSetup     bool
-		noAutoSetup   bool
-		redisEmb      bool
-		noRedisEmb    bool
-		configPath    string
+		help            bool
+		version         bool
+		setupCLI        bool
+		autoSetup       bool
+		noAutoSetup     bool
+		redisEmb        bool
+		noRedisEmb      bool
+		configPath      string
 		configPathShort string
-		dataDir       string
-		deployMode    string
-		runMode       string
-		dbDriver      string
-		dbPath        string
-		host          string
-		port          string
-		timezone      string
-		tzShort       string
-		adminEmail    string
-		adminPassword string
-		jwtSecret     string
+		dataDir         string
+		deployMode      string
+		runMode         string
+		dbDriver        string
+		dbPath          string
+		host            string
+		port            string
+		timezone        string
+		tzShort         string
+		adminEmail      string
+		adminPassword   string
+		jwtSecret       string
 	)
 
 	fs.BoolVar(&help, "help", false, "show help")
