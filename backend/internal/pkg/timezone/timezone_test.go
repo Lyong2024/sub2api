@@ -29,9 +29,18 @@ func TestInit(t *testing.T) {
 }
 
 func TestInitInvalidTimezone(t *testing.T) {
+	// Invalid IANA names fall back to UTC (with warning) so Windows/DIY hosts
+	// without a matching zone never hard-crash after install. time/tzdata covers
+	// real names like Asia/Shanghai; only truly unknown labels hit this path.
 	err := Init("Invalid/Timezone")
-	if err == nil {
-		t.Error("Init should fail with invalid timezone")
+	if err != nil {
+		t.Fatalf("Init should fall back to UTC for invalid timezone, got error: %v", err)
+	}
+	if Name() != "UTC" {
+		t.Errorf("Name() = %q, want UTC after invalid timezone fallback", Name())
+	}
+	if time.Local.String() != "UTC" {
+		t.Errorf("time.Local = %q, want UTC after invalid timezone fallback", time.Local.String())
 	}
 }
 
