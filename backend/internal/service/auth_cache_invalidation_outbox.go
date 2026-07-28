@@ -85,19 +85,19 @@ func (s *OpsService) GetAuthCacheInvalidationHealth(ctx context.Context) OpsAuth
 }
 
 type AuthCacheInvalidationWorker struct {
-	repo      AuthCacheInvalidationOutboxRepository
-	cache     APIKeyCache
-	local     *APIKeyService
-	workerID  string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	start     sync.Once
-	stop      sync.Once
-	running   atomic.Bool
-	processed atomic.Uint64
-	failures  atomic.Uint64
-	lastError atomic.Value
+	repo       AuthCacheInvalidationOutboxRepository
+	cache      APIKeyCache
+	local      *APIKeyService
+	workerID   string
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	start      sync.Once
+	stop       sync.Once
+	running    atomic.Bool
+	processed  atomic.Uint64
+	failures   atomic.Uint64
+	lastError  atomic.Value
 	skipOutbox bool
 }
 

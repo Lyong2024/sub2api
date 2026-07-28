@@ -144,8 +144,11 @@ jobs:
             dist/*.zip
           retention-days: 30
 
+  # Always publish to GitHub Releases so binaries appear under /releases
+  # (not only under Actions Artifacts).
+  # - push diy / workflow_dispatch → rolling prerelease tag diy-latest
+  # - tag diy-v* → versioned release (non-prerelease)
   release:
-    if: startsWith(github.ref, 'refs/tags/diy-v')
     needs: build-binaries
     runs-on: ubuntu-latest
     steps:
@@ -156,19 +159,80 @@ jobs:
           pattern: sub2api-diy-*
           merge-multiple: true
 
+      - name: Prepare release meta and stable asset names
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          shopt -s nullglob
+          for f in artifacts/*; do
+            [ -f "$f" ] || continue
+            cp "$f" release-assets/
+            base=$(basename "$f")
+            case "$base" in
+              *linux_amd64.tar.gz)   cp "$f" release-assets/sub2api-diy-linux-amd64.tar.gz ;;
+              *linux_arm64.tar.gz)   cp "$f" release-assets/sub2api-diy-linux-arm64.tar.gz ;;
+              *windows_amd64.zip)    cp "$f" release-assets/sub2api-diy-windows-amd64.zip ;;
+              *darwin_amd64.tar.gz)  cp "$f" release-assets/sub2api-diy-darwin-amd64.tar.gz ;;
+              *darwin_arm64.tar.gz)  cp "$f" release-assets/sub2api-diy-darwin-arm64.tar.gz ;;
+            esac
+          done
+          echo "Assets ready:"
+          ls -la release-assets/
+
+          if [[ "${{ github.ref }}" == refs/tags/diy-v* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            echo "name=DIY ${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "generate_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=diy-latest" >> "$GITHUB_OUTPUT"
+            echo "name=DIY Latest (${GITHUB_SHA::8})" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "generate_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Reset rolling diy-latest release (avoid stale assets)
+        if: steps.meta.outputs.tag == 'diy-latest'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # Recreate so stable filenames (linux-amd64.tar.gz etc.) always point at this build.
+          gh release delete diy-latest --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: DIY ${{ github.ref_name }}
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          target_commitish: ${{ steps.meta.outputs.commit }}
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          generate_release_notes: ${{ steps.meta.outputs.generate_notes == 'true' }}
           body: |
             Sub2API **DIY** 单二进制发布（SQLite WAL + 嵌入式 Redis + 内嵌 Web UI）。
 
-            仅需暴露 **8080**。详见 `README_DIY.md` / `README_DIY_CN.md`。
+            - **Commit**: `${{ steps.meta.outputs.short }}`
+            - **Tag**: `${{ steps.meta.outputs.tag }}`
+            - 仅需暴露 **8080**
+
+            详见 `README_DIY.md` / `README_DIY_CN.md`。
 
             ```bash
             export DEPLOY_MODE=diy
             ./sub2api
             ```
+
+            ### 下载说明
+            优先下载固定文件名（便于脚本拉取）：
+            - `sub2api-diy-linux-amd64.tar.gz`
+            - `sub2api-diy-linux-arm64.tar.gz`
+            - `sub2api-diy-windows-amd64.zip`
+            - `sub2api-diy-darwin-amd64.tar.gz`
+            - `sub2api-diy-darwin-arm64.tar.gz`
           files: |
-            artifacts/**
-          generate_release_notes: true
+            release-assets/*
+          fail_on_unmatched_files: true
