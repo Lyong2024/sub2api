@@ -65,6 +65,19 @@ Windows PowerShell：
 浏览器打开 `http://127.0.0.1:8080`。  
 首次 DIY 自动安装会：建库（WAL）、创建管理员、写入 `config.yaml` 与 `.installed`。
 
+### Chrome 打开却显示「以前本地项目」的页面？
+
+`127.0.0.1:8080` / `localhost:8080` 常被多个本地项目共用。若以前某个前端注册过 **Service Worker**，Chrome 可能一直劫持该源，显示旧站而不是 Sub2API。
+
+处理（任选其一）：
+
+1. **推荐**：Chrome 打开 `chrome://settings/content/all` → 搜索 `127.0.0.1` → 删除该站点数据  
+2. 或 F12 → Application → Service Workers → Unregister；Storage → Clear site data  
+3. 或用 **无痕模式** / 换端口：`sub2api.exe -port=18080` 后访问 `http://127.0.0.1:18080`  
+4. 硬刷新：`Ctrl+Shift+R`（有时不够，需清站点数据）
+
+新版本会在 HTML 中主动 `unregister` Service Worker，并对常见 `/sw.js` 路径返回 410。
+
 ### 配置优先级（高 → 低）
 
 1. **命令行参数**

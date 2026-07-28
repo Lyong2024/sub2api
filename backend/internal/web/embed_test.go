@@ -400,7 +400,7 @@ func TestFrontendServer_ServeIndexHTML(t *testing.T) {
 
 		server.serveIndexHTML(c)
 
-		assert.Equal(t, "no-cache", w.Header().Get("Cache-Control"))
+		assert.Equal(t, "no-cache, no-store, must-revalidate", w.Header().Get("Cache-Control"))
 	})
 
 	t.Run("fallback_on_settings_error", func(t *testing.T) {
@@ -645,6 +645,10 @@ func TestFrontendServer_Middleware(t *testing.T) {
 		server, err := NewFrontendServer(provider)
 		require.NoError(t, err)
 
+		if !server.fileExists("logo.png") {
+			t.Skip("stub dist has no static assets; full frontend dist required")
+		}
+
 		router := gin.New()
 		router.Use(server.Middleware())
 
@@ -675,6 +679,21 @@ func TestFrontendServer_Middleware(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, assetWriter.Code)
 		assert.Equal(t, staticAssetsCacheControl, assetWriter.Header().Get("Cache-Control"))
+	})
+
+	t.Run("kills_legacy_service_worker_paths", func(t *testing.T) {
+		provider := &mockSettingsProvider{settings: map[string]string{}}
+		server, err := NewFrontendServer(provider)
+		require.NoError(t, err)
+		router := gin.New()
+		router.Use(server.Middleware())
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/sw.js", nil)
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusGone, w.Code)
+		assert.Contains(t, w.Body.String(), "unregister")
+		assert.Equal(t, "no-store, max-age=0", w.Header().Get("Cache-Control"))
 	})
 }
 
@@ -715,7 +734,7 @@ func TestNewFrontendServer(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.NotEmpty(t, server.baseHTML)
-		assert.Contains(t, string(server.baseHTML), "<!doctype html>")
+		assert.Contains(t, strings.ToLower(string(server.baseHTML)), "<!doctype html>")
 	})
 }
 
@@ -729,6 +748,12 @@ func TestHasEmbeddedFrontend(t *testing.T) {
 // Tests for legacy ServeEmbeddedFrontend function
 func TestServeEmbeddedFrontend(t *testing.T) {
 	t.Run("serves_static_files", func(t *testing.T) {
+		server, err := NewFrontendServer(&mockSettingsProvider{settings: map[string]string{}})
+		require.NoError(t, err)
+		if !server.fileExists("logo.png") {
+			t.Skip("stub dist has no logo.png; full frontend dist required")
+		}
+
 		middleware := ServeEmbeddedFrontend()
 
 		router := gin.New()
@@ -754,7 +779,7 @@ func TestServeEmbeddedFrontend(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Header().Get("Content-Type"), "text/html")
-		assert.Contains(t, w.Body.String(), "<!doctype html>")
+		assert.Contains(t, strings.ToLower(w.Body.String()), "<!doctype html>")
 	})
 
 	t.Run("serves_index_html_for_spa_routes", func(t *testing.T) {

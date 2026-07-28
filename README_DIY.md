@@ -64,6 +64,19 @@ Windows PowerShell:
 Open `http://127.0.0.1:8080`.  
 First DIY run creates the SQLite schema, admin user, `config.yaml`, and `.installed`.
 
+### Chrome shows an old local website instead of Sub2API?
+
+Port `8080` is shared by many local apps. A previous app may have registered a **Service Worker** for `http://127.0.0.1:8080` that keeps serving the old UI.
+
+Fix (any one):
+
+1. Chrome → `chrome://settings/content/all` → search `127.0.0.1` → delete site data  
+2. DevTools → Application → Service Workers → Unregister; Storage → Clear site data  
+3. Use Incognito, or another port: `sub2api.exe -port=18080`  
+4. Hard reload is often not enough if a SW is controlling the page  
+
+Recent builds unregister stale service workers and return 410 for common `/sw.js` paths.
+
 ### Precedence (high → low)
 
 1. CLI flags  

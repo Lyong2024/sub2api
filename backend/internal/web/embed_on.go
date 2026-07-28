@@ -88,6 +88,13 @@ func (s *FrontendServer) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 
+		// Kill stale Service Workers from other apps that previously used this origin
+		// (Chrome often reuses 127.0.0.1:8080 for many local projects).
+		if isLegacyServiceWorkerPath(path) {
+			serveNoServiceWorker(c)
+			return
+		}
+
 		// Skip API routes
 		if shouldBypassEmbeddedFrontend(path) {
 			c.Next()
@@ -115,6 +122,33 @@ func (s *FrontendServer) Middleware() gin.HandlerFunc {
 		s.fileServer.ServeHTTP(c.Writer, c.Request)
 		c.Abort()
 	}
+}
+
+// isLegacyServiceWorkerPath reports paths commonly used by local dev PWAs.
+func isLegacyServiceWorkerPath(path string) bool {
+	p := strings.ToLower(strings.TrimSpace(path))
+	switch p {
+	case "/sw.js", "/service-worker.js", "/serviceworker.js",
+		"/firebase-messaging-sw.js", "/ngsw-worker.js", "/workbox-sw.js":
+		return true
+	default:
+		return strings.HasSuffix(p, "/sw.js") || strings.HasSuffix(p, "/service-worker.js")
+	}
+}
+
+// serveNoServiceWorker returns a non-functional SW script so browsers drop old
+// registrations that hijack localhost/127.0.0.1 ports.
+func serveNoServiceWorker(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, max-age=0")
+	c.Header("Service-Worker-Allowed", "/")
+	// Hint clients to drop HTTP cache for this origin without wiping localStorage.
+	c.Header("Clear-Site-Data", `"cache"`)
+	c.Data(http.StatusGone, "text/javascript; charset=utf-8", []byte(
+		"/* Sub2API does not use a Service Worker. Stale SW from another local app should unregister. */\n"+
+			"self.addEventListener('install',function(){self.skipWaiting();});\n"+
+			"self.addEventListener('activate',function(e){e.waitUntil(self.registration.unregister());});\n",
+	))
+	c.Abort()
 }
 
 func (s *FrontendServer) fileExists(path string) bool {
@@ -160,7 +194,7 @@ func (s *FrontendServer) serveIndexHTML(c *gin.Context) {
 		content := replaceNoncePlaceholder(cached.Content, nonce)
 
 		c.Header("ETag", cached.ETag)
-		c.Header("Cache-Control", "no-cache") // Must revalidate
+		applySPAHTMLCacheHeaders(c)
 		c.Data(http.StatusOK, "text/html; charset=utf-8", content)
 		c.Abort()
 		return
@@ -173,7 +207,8 @@ func (s *FrontendServer) serveIndexHTML(c *gin.Context) {
 	settings, err := s.settings.GetPublicSettingsForInjection(ctx)
 	if err != nil {
 		// Fallback: serve without injection
-		c.Data(http.StatusOK, "text/html; charset=utf-8", s.baseHTML)
+		applySPAHTMLCacheHeaders(c)
+		c.Data(http.StatusOK, "text/html; charset=utf-8", injectStaleOriginCleanup(s.baseHTML, nonce))
 		c.Abort()
 		return
 	}
@@ -181,7 +216,8 @@ func (s *FrontendServer) serveIndexHTML(c *gin.Context) {
 	settingsJSON, err := json.Marshal(settings)
 	if err != nil {
 		// Fallback: serve without injection
-		c.Data(http.StatusOK, "text/html; charset=utf-8", s.baseHTML)
+		applySPAHTMLCacheHeaders(c)
+		c.Data(http.StatusOK, "text/html; charset=utf-8", injectStaleOriginCleanup(s.baseHTML, nonce))
 		c.Abort()
 		return
 	}
@@ -196,19 +232,52 @@ func (s *FrontendServer) serveIndexHTML(c *gin.Context) {
 	if cached != nil {
 		c.Header("ETag", cached.ETag)
 	}
-	c.Header("Cache-Control", "no-cache")
+	applySPAHTMLCacheHeaders(c)
 	c.Data(http.StatusOK, "text/html; charset=utf-8", content)
 	c.Abort()
+}
+
+func applySPAHTMLCacheHeaders(c *gin.Context) {
+	// Force revalidation so Chrome does not keep an old local-dev document for :8080.
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Clear-Site-Data", `"cache"`)
+}
+
+// staleOriginCleanupScript unregisters Service Workers left by other apps on the
+// same origin (typical when reusing 127.0.0.1:8080 / localhost:8080 for DIY).
+const staleOriginCleanupScript = `(function(){try{if('serviceWorker' in navigator){navigator.serviceWorker.getRegistrations().then(function(rs){rs.forEach(function(r){r.unregister();});});}if(window.caches&&caches.keys){caches.keys().then(function(ks){ks.forEach(function(k){caches.delete(k);});});}}catch(e){}})();`
+
+func injectStaleOriginCleanup(html []byte, nonce string) []byte {
+	if bytes.Contains(html, []byte("serviceWorker.getRegistrations")) {
+		return html
+	}
+	nonceAttr := ""
+	if strings.TrimSpace(nonce) != "" {
+		nonceAttr = ` nonce="` + htmlpkg.EscapeString(nonce) + `"`
+	}
+	script := []byte(`<script` + nonceAttr + `>` + staleOriginCleanupScript + `</script>`)
+	headClose := []byte("</head>")
+	if bytes.Contains(html, headClose) {
+		return bytes.Replace(html, headClose, append(script, headClose...), 1)
+	}
+	// Stub HTML may lack </head>
+	return append(script, html...)
 }
 
 func (s *FrontendServer) injectSettings(settingsJSON []byte) []byte {
 	// Create the script tag to inject with nonce placeholder
 	// The placeholder will be replaced with actual nonce at request time
 	script := []byte(`<script nonce="` + NonceHTMLPlaceholder + `">window.__APP_CONFIG__=` + string(settingsJSON) + `;</script>`)
+	cleanup := []byte(`<script nonce="` + NonceHTMLPlaceholder + `">` + staleOriginCleanupScript + `</script>`)
 
 	// Inject before </head>
 	headClose := []byte("</head>")
-	result := bytes.Replace(s.baseHTML, headClose, append(script, headClose...), 1)
+	result := bytes.Replace(s.baseHTML, headClose, append(append(cleanup, script...), headClose...), 1)
+	if bytes.Equal(result, s.baseHTML) {
+		// No </head> in stub HTML
+		result = append(append(cleanup, script...), s.baseHTML...)
+	}
 
 	// Apply custom branding before the browser paints the static defaults.
 	result = injectSiteTitle(result, settingsJSON)
