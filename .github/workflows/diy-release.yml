@@ -1,6 +1,8 @@
 name: DIY Release
 
 # 每次推送到 diy 分支或打 diy-v* tag 时，自动构建多平台单二进制（内嵌前端 + SQLite DIY）。
+# 压缩包命名：sub2api-YYMMDD-{goos}-{goarch}.tar.gz|zip
+# 例：sub2api-260728-linux-amd64.tar.gz
 on:
   push:
     branches:
@@ -10,9 +12,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version label for artifacts (e.g. 1.0.0-diy)'
+        description: '可选版本号；留空则用构建日 UTC 日期 YYMMDD（如 260728）'
         required: false
-        default: 'snapshot'
+        default: ''
         type: string
 
 permissions:
@@ -88,19 +90,39 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
-      - name: Resolve version
+      - name: Resolve version (YYMMDD by default)
         id: ver
         shell: bash
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            V="${GITHUB_REF#refs/tags/}"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.version }}" ]]; then
-            V="${{ github.event.inputs.version }}"
+          set -euo pipefail
+          # 构建日版本：UTC 日期，例 2026-07-28 → 260728
+          DATE_VER="$(date -u +%y%m%d)"
+          INPUT_VER="${{ github.event.inputs.version }}"
+
+          if [[ "${{ github.ref }}" == refs/tags/diy-v* ]]; then
+            # tag diy-v1.2.3 → 优先用 tag 中版本段；若只想用日期也可改成 DATE_VER
+            TAG="${GITHUB_REF#refs/tags/}"
+            V="${TAG#diy-v}"
+            V="${V#v}"
+            if [[ -z "$V" ]]; then
+              V="$DATE_VER"
+            fi
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${INPUT_VER// }" ]]; then
+            V="${INPUT_VER// /}"
           else
-            V="diy-${GITHUB_SHA::8}"
+            V="$DATE_VER"
           fi
+
+          # 包名片段仅允许安全字符
+          V="$(echo "$V" | tr -c 'A-Za-z0-9._-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')"
+          if [[ -z "$V" ]]; then
+            V="$DATE_VER"
+          fi
+
           echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "date=$DATE_VER" >> "$GITHUB_OUTPUT"
           echo "commit=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          echo "Resolved package version: $V (date=$DATE_VER commit=${GITHUB_SHA::8})"
 
       - name: Build
         working-directory: backend
@@ -110,18 +132,21 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           mkdir -p ../dist
-          OUT="sub2api_${{ steps.ver.outputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}"
+          # 二进制：sub2api-260728-linux-amd64[.exe]
+          OUT="sub2api-${{ steps.ver.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           go build -tags embed \
             -ldflags="-s -w -X main.Version=${{ steps.ver.outputs.version }} -X main.Commit=${{ steps.ver.outputs.commit }} -X main.BuildType=release" \
             -o "../dist/${OUT}" \
             ./cmd/server
           echo "BINARY=${OUT}" >> "$GITHUB_ENV"
+          echo "PKG_BASE=sub2api-${{ steps.ver.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}" >> "$GITHUB_ENV"
 
       - name: Package
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p package
-          cp "dist/${BINARY}" package/sub2api${{ matrix.ext }}
+          cp "dist/${BINARY}" "package/sub2api${{ matrix.ext }}"
           cp deploy/diy/config.example.yaml package/
           cp deploy/diy/.env.example package/
           cp deploy/diy/sub2api.service package/ 2>/dev/null || true
@@ -130,22 +155,24 @@ jobs:
           cp README_DIY_CN.md package/ 2>/dev/null || true
           cd package
           if [[ "${{ matrix.goos }}" == "windows" ]]; then
-            zip -r "../dist/${BINARY%.exe}.zip" .
+            # sub2api-260728-windows-amd64.zip
+            zip -r "../dist/${PKG_BASE}.zip" .
           else
-            tar -czf "../dist/${BINARY}.tar.gz" .
+            # sub2api-260728-linux-amd64.tar.gz
+            tar -czf "../dist/${PKG_BASE}.tar.gz" .
           fi
+          ls -la ../dist/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: sub2api-diy-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: sub2api-${{ steps.ver.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             dist/*.tar.gz
             dist/*.zip
           retention-days: 30
 
-  # Always publish to GitHub Releases so binaries appear under /releases
-  # (not only under Actions Artifacts).
+  # Always publish to GitHub Releases so binaries appear under /releases.
   # - push diy / workflow_dispatch → rolling prerelease tag diy-latest
   # - tag diy-v* → versioned release (non-prerelease)
   release:
@@ -156,10 +183,10 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
-          pattern: sub2api-diy-*
+          pattern: sub2api-*
           merge-multiple: true
 
-      - name: Prepare release meta and stable asset names
+      - name: Prepare release meta
         id: meta
         shell: bash
         run: |
@@ -168,30 +195,43 @@ jobs:
           shopt -s nullglob
           for f in artifacts/*; do
             [ -f "$f" ] || continue
-            cp "$f" release-assets/
-            base=$(basename "$f")
-            case "$base" in
-              *linux_amd64.tar.gz)   cp "$f" release-assets/sub2api-diy-linux-amd64.tar.gz ;;
-              *linux_arm64.tar.gz)   cp "$f" release-assets/sub2api-diy-linux-arm64.tar.gz ;;
-              *windows_amd64.zip)    cp "$f" release-assets/sub2api-diy-windows-amd64.zip ;;
-              *darwin_amd64.tar.gz)  cp "$f" release-assets/sub2api-diy-darwin-amd64.tar.gz ;;
-              *darwin_arm64.tar.gz)  cp "$f" release-assets/sub2api-diy-darwin-arm64.tar.gz ;;
+            case "$(basename "$f")" in
+              *.tar.gz|*.zip) cp "$f" release-assets/ ;;
             esac
           done
-          echo "Assets ready:"
+          echo "Release assets:"
           ls -la release-assets/
+          count=$(find release-assets -type f | wc -l | tr -d ' ')
+          if [[ "$count" -lt 1 ]]; then
+            echo "No package files found under artifacts/"
+            find artifacts -type f || true
+            exit 1
+          fi
+
+          # 从包名推断版本：sub2api-260728-linux-amd64.tar.gz → 260728
+          SAMPLE=$(ls release-assets/sub2api-*-linux-amd64.tar.gz release-assets/sub2api-*.tar.gz 2>/dev/null | head -1 || true)
+          PKG_VER=""
+          if [[ -n "$SAMPLE" ]]; then
+            base=$(basename "$SAMPLE")
+            # sub2api-VER-goos-goarch.ext
+            PKG_VER=$(echo "$base" | sed -E 's/^sub2api-//; s/-(linux|windows|darwin)-.*$//')
+          fi
+          if [[ -z "$PKG_VER" ]]; then
+            PKG_VER="$(date -u +%y%m%d)"
+          fi
 
           if [[ "${{ github.ref }}" == refs/tags/diy-v* ]]; then
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-            echo "name=DIY ${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            echo "name=DIY ${GITHUB_REF#refs/tags/} (${PKG_VER})" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
             echo "generate_notes=true" >> "$GITHUB_OUTPUT"
           else
             echo "tag=diy-latest" >> "$GITHUB_OUTPUT"
-            echo "name=DIY Latest (${GITHUB_SHA::8})" >> "$GITHUB_OUTPUT"
+            echo "name=DIY ${PKG_VER}" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
             echo "generate_notes=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "pkg_ver=$PKG_VER" >> "$GITHUB_OUTPUT"
           echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           echo "short=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
 
@@ -201,7 +241,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          # Recreate so stable filenames (linux-amd64.tar.gz etc.) always point at this build.
           gh release delete diy-latest --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
 
       - name: Create GitHub Release
@@ -215,6 +254,7 @@ jobs:
           body: |
             Sub2API **DIY** 单二进制发布（SQLite WAL + 嵌入式 Redis + 内嵌 Web UI）。
 
+            - **版本（包名）**: `${{ steps.meta.outputs.pkg_ver }}`（构建日 UTC `YYMMDD`）
             - **Commit**: `${{ steps.meta.outputs.short }}`
             - **Tag**: `${{ steps.meta.outputs.tag }}`
             - 仅需暴露 **8080**
@@ -226,13 +266,15 @@ jobs:
             ./sub2api
             ```
 
-            ### 下载说明
-            优先下载固定文件名（便于脚本拉取）：
-            - `sub2api-diy-linux-amd64.tar.gz`
-            - `sub2api-diy-linux-arm64.tar.gz`
-            - `sub2api-diy-windows-amd64.zip`
-            - `sub2api-diy-darwin-amd64.tar.gz`
-            - `sub2api-diy-darwin-arm64.tar.gz`
+            ### 下载文件命名
+
+            ```
+            sub2api-${{ steps.meta.outputs.pkg_ver }}-linux-amd64.tar.gz
+            sub2api-${{ steps.meta.outputs.pkg_ver }}-linux-arm64.tar.gz
+            sub2api-${{ steps.meta.outputs.pkg_ver }}-windows-amd64.zip
+            sub2api-${{ steps.meta.outputs.pkg_ver }}-darwin-amd64.tar.gz
+            sub2api-${{ steps.meta.outputs.pkg_ver }}-darwin-arm64.tar.gz
+            ```
           files: |
             release-assets/*
           fail_on_unmatched_files: true
