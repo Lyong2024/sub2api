@@ -1065,7 +1065,10 @@ func (s *UserService) hydrateUserAvatar(ctx context.Context, user *User) error {
 
 	avatar, err := s.userRepo.GetUserAvatar(ctx, user.ID)
 	if err != nil {
-		return err
+		// Avatar is optional; never fail auth/profile load because of avatar storage issues
+		// (e.g. DIY SQLite before aux tables exist). Log and continue without avatar.
+		slog.Debug("skip user avatar hydration", "user_id", user.ID, "error", err)
+		return nil
 	}
 	applyUserAvatar(user, avatar)
 	return nil

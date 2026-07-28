@@ -211,14 +211,62 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	if _, err := drv.DB().ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("ensure schema_migrations: %w", err)
 	}
+	// Tables that live only in Postgres migrations (not Ent models) but are hit
+	// on auth hot paths. Missing them makes every /auth/me fail with USER_NOT_FOUND.
+	if err := ensureSQLiteAuxTables(ctx, drv.DB()); err != nil {
+		return err
+	}
+
 	const marker = "diy_ent_bootstrap"
-	const checksum = "diy-ent-schema-v1"
+	const checksum = "diy-ent-schema-v2"
 	_, err := drv.DB().ExecContext(ctx, `
 INSERT OR IGNORE INTO schema_migrations (filename, checksum, applied_at)
 VALUES (?, ?, datetime('now'))
 `, marker, checksum)
 	if err != nil {
 		return fmt.Errorf("record diy bootstrap: %w", err)
+	}
+	return nil
+}
+
+// ensureSQLiteAuxTables creates migration-only tables required by auth/profile
+// raw SQL that is not covered by Ent Schema.Create.
+func ensureSQLiteAuxTables(ctx context.Context, db *sql.DB) error {
+	if db == nil {
+		return nil
+	}
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS user_avatars (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL UNIQUE,
+			storage_provider TEXT NOT NULL DEFAULT 'database',
+			storage_key TEXT NOT NULL DEFAULT '',
+			url TEXT NOT NULL DEFAULT '',
+			content_type TEXT NOT NULL DEFAULT '',
+			byte_size INTEGER NOT NULL DEFAULT 0,
+			sha256 TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS user_avatars_user_id_key ON user_avatars (user_id)`,
+		`CREATE TABLE IF NOT EXISTS user_provider_default_grants (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			provider_type TEXT NOT NULL,
+			grant_reason TEXT NOT NULL DEFAULT 'first_bind',
+			granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			UNIQUE (user_id, provider_type, grant_reason),
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS user_provider_default_grants_user_id_idx
+			ON user_provider_default_grants (user_id)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("ensure sqlite aux table: %w", err)
+		}
 	}
 	return nil
 }

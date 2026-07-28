@@ -738,11 +738,17 @@ SELECT storage_provider, storage_key, url, content_type, byte_size, sha256
 FROM user_avatars
 WHERE user_id = $1`, userID)
 	if err != nil {
+		// DIY SQLite may lag migrations; missing table means "no avatar", not auth failure.
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "no such table") || strings.Contains(msg, "does not exist") {
+			return nil, nil
+		}
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
 	if !rows.Next() {
+		// No avatar row is normal.
 		return nil, rows.Err()
 	}
 
