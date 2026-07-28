@@ -235,7 +235,6 @@ func (r *usageCleanupRepository) scanClaimedUsageCleanupTask(ctx context.Context
 	return &task, nil
 }
 
-
 func (r *usageCleanupRepository) GetTaskStatus(ctx context.Context, taskID int64) (string, error) {
 	if r.client != nil {
 		return r.getTaskStatusWithEnt(ctx, taskID)

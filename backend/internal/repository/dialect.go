@@ -44,11 +44,3 @@ func ActiveDialect() string {
 func IsSQLiteDialect() bool {
 	return ActiveDialect() == DialectSQLite
 }
-
-// sqlNowExpr returns a SQL expression for the current timestamp in the active dialect.
-func sqlNowExpr() string {
-	if IsSQLiteDialect() {
-		return "datetime('now')"
-	}
-	return "NOW()"
-}

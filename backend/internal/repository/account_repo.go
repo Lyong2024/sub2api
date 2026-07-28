@@ -1248,7 +1248,6 @@ func (r *accountRepository) finishOAuthRefreshCandidatePage(ctx context.Context,
 	return page, nil
 }
 
-
 func (r *accountRepository) ListByPlatform(ctx context.Context, platform string) ([]service.Account, error) {
 	accounts, err := r.client.Account.Query().
 		Where(

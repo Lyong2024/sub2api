@@ -106,13 +106,13 @@ type Config struct {
 	TokenRefresh            TokenRefreshConfig            `mapstructure:"token_refresh"`
 	RunMode                 string                        `mapstructure:"run_mode" yaml:"run_mode"`
 	// DeployMode selects topology: "standard" (Postgres+Redis) or "diy" (SQLite WAL + embedded Redis).
-	DeployMode              string                        `mapstructure:"deploy_mode" yaml:"deploy_mode"`
-	Timezone                string                        `mapstructure:"timezone"` // e.g. "Asia/Shanghai", "UTC"
-	Gemini                  GeminiConfig                  `mapstructure:"gemini"`
-	Update                  UpdateConfig                  `mapstructure:"update"`
-	Idempotency             IdempotencyConfig             `mapstructure:"idempotency"`
-	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
-	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
+	DeployMode   string             `mapstructure:"deploy_mode" yaml:"deploy_mode"`
+	Timezone     string             `mapstructure:"timezone"` // e.g. "Asia/Shanghai", "UTC"
+	Gemini       GeminiConfig       `mapstructure:"gemini"`
+	Update       UpdateConfig       `mapstructure:"update"`
+	Idempotency  IdempotencyConfig  `mapstructure:"idempotency"`
+	BatchImage   BatchImageConfig   `mapstructure:"batch_image"`
+	ImageStorage ImageStorageConfig `mapstructure:"image_storage"`
 }
 
 // IsDIY returns true when the process should run as a single-binary DIY deployment.
@@ -1391,7 +1391,7 @@ type DatabaseConfig struct {
 	// Driver selects the SQL dialect: "postgres" (default) or "sqlite".
 	Driver string `mapstructure:"driver"`
 	// Path is the SQLite database file path (used when Driver=sqlite).
-	Path string `mapstructure:"path"`
+	Path     string `mapstructure:"path"`
 	Host     string `mapstructure:"host"`
 	Port     int    `mapstructure:"port"`
 	User     string `mapstructure:"user"`
@@ -1481,7 +1481,7 @@ func (d *DatabaseConfig) DSNWithTimezone(tz string) string {
 type RedisConfig struct {
 	// Embedded runs an in-process Redis-compatible server (miniredis) for DIY mode.
 	// When true, Host/Port/Password are ignored for outbound connections.
-	Embedded bool `mapstructure:"embedded"`
+	Embedded bool   `mapstructure:"embedded"`
 	Host     string `mapstructure:"host"`
 	Port     int    `mapstructure:"port"`
 	Username string `mapstructure:"username"`
