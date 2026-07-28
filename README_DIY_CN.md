@@ -26,51 +26,84 @@
 
 支持：`linux/amd64`、`linux/arm64`、`windows/amd64`、`darwin/amd64`、`darwin/arm64`。
 
-## 快速启动（手动）
+## 快速启动（命令行参数，推荐）
+
+**直接双击 / 无参数运行**只会打印帮助，不会启动服务。请带参数运行：
 
 ```bash
-chmod +x sub2api
+# 查看帮助
+./sub2api -h          # Windows: sub2api.exe -h
 
-# 可选：复制配置
-cp config.example.yaml config.yaml
-# 或 cp .env.example .env 后编辑
+# DIY 首次安装并启动（SQLite + 内嵌 Redis）
+./sub2api -deploy-mode=diy -auto-setup \
+  -admin-email=admin@example.com \
+  -admin-password=请改成强密码 \
+  -port=8080
 
-export DEPLOY_MODE=diy
-export AUTO_SETUP=true
-./sub2api
+# 使用 YAML 配置启动
+./sub2api -config=./config.yaml
+# 简写
+./sub2api -c ./config.yaml
+
+# 指定数据目录与库文件
+./sub2api -deploy-mode=diy -data-dir=./data -db-path=./data/sub2api.db -auto-setup
+
+# 标准模式（PostgreSQL + 外部 Redis，需先写好 config.yaml）
+./sub2api -deploy-mode=standard -config=./config.yaml
+
+# 终端交互安装向导
+./sub2api -setup
+```
+
+Windows PowerShell：
+
+```powershell
+.\sub2api.exe -deploy-mode=diy -auto-setup -admin-email=admin@example.com -admin-password=pass123456 -port=8080
+.\sub2api.exe -c .\config.yaml
 ```
 
 浏览器打开 `http://127.0.0.1:8080`。  
-首次运行会自动：建库（WAL）、创建管理员、写入 `config.yaml` 与 `.installed`。
+首次 DIY 自动安装会：建库（WAL）、创建管理员、写入 `config.yaml` 与 `.installed`。
 
-### 常用环境变量
+### 配置优先级（高 → 低）
 
-| 变量 | 含义 | 默认 |
-|------|------|------|
-| `DEPLOY_MODE` | `diy` / `standard` | `standard` |
-| `DATABASE_DRIVER` | `sqlite` / `postgres` | `postgres` |
-| `DATABASE_PATH` | SQLite 路径 | `./data/sub2api.db` 或 `$DATA_DIR/sub2api.db` |
-| `REDIS_EMBEDDED` | 进程内 Redis | DIY 下 `true` |
-| `SERVER_PORT` | 监听端口 | `8080` |
-| `AUTO_SETUP` | 无配置时自动安装 | DIY 下 `true` |
-| `ADMIN_EMAIL` | 初始管理员邮箱 | `admin@sub2api.local` |
-| `ADMIN_PASSWORD` | 初始密码 | 空则自动生成并打印 |
-| `JWT_SECRET` | ≥32 字节 | 空则自动生成 |
-| `DATA_DIR` | 数据与配置目录 | `.` |
-| `CONFIG_FILE` | 指定配置文件路径 | 按搜索路径 |
+1. **命令行参数**
+2. 进程环境变量
+3. 工作目录 `.env` / `DATA_DIR/.env`
+4. `-config` 指定的 YAML 或默认搜索的 `config.yaml`
+5. 内置默认值（本 DIY 发行版默认 `deploy_mode=diy`）
 
-`.env` 示例：
+### 常用参数
 
-```bash
-DEPLOY_MODE=diy
-AUTO_SETUP=true
-SERVER_PORT=8080
-DATABASE_PATH=./data/sub2api.db
-ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=请改成强密码
-JWT_SECRET=请改成至少32字节的随机串
-TZ=Asia/Shanghai
-```
+| 参数 | 含义 |
+|------|------|
+| `-h` / `-help` | 帮助 |
+| `-config` / `-c` | YAML 配置文件路径 |
+| `-deploy-mode` | `diy` 或 `standard` |
+| `-run-mode` | `standard` 或 `simple`（跳过计费） |
+| `-auto-setup` / `-no-auto-setup` | 首次自动安装 |
+| `-db-path` | SQLite 路径 |
+| `-data-dir` | 数据目录 |
+| `-host` / `-port` | 监听地址端口 |
+| `-admin-email` / `-admin-password` | 首次管理员 |
+| `-jwt-secret` | JWT 密钥 |
+| `-timezone` / `-tz` | 时区，如 `Asia/Shanghai` |
+| `-setup` | 交互式安装向导 |
+| `-version` | 版本 |
+
+### 环境变量（可选，等价于参数）
+
+| 变量 | 含义 |
+|------|------|
+| `DEPLOY_MODE` | `diy` / `standard` |
+| `DATABASE_PATH` | SQLite 路径 |
+| `AUTO_SETUP` | 自动安装 |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | 初始管理员 |
+| `CONFIG_FILE` | 配置文件路径 |
+| `SERVER_PORT` | 端口 |
+| `DATA_DIR` | 数据目录 |
+
+仍可用 `.env` 或 `config.example.yaml` → `config.yaml`，但**推荐参数启动**，避免 bat/sh 包装。
 
 ## Linux：systemd 开机自启
 

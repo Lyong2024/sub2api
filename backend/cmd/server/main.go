@@ -6,7 +6,7 @@ import (
 	"context"
 	_ "embed"
 	"errors"
-	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -53,38 +53,46 @@ func init() {
 	}
 }
 
-// initLogger configures the default slog handler based on gin.Mode().
-// In non-release mode, Debug level logs are enabled.
 func main() {
 	logger.InitBootstrap()
 	defer logger.Sync()
 
-	// Parse command line flags
-	setupMode := flag.Bool("setup", false, "Run setup wizard in CLI mode")
-	showVersion := flag.Bool("version", false, "Show version information")
-	flag.Parse()
+	opt, err := parseCLI(os.Args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "参数错误: %v\n\n", err)
+		printUsage(os.Stderr)
+		os.Exit(2)
+	}
 
-	if *showVersion {
-		log.Printf("Sub2API %s (commit: %s, built: %s)\n", Version, Commit, Date)
+	if opt.showHelp {
+		printUsage(os.Stdout)
+		return
+	}
+	if opt.showVersion {
+		fmt.Printf("Sub2API %s (commit: %s, build: %s, type: %s)\n", Version, Commit, Date, BuildType)
 		return
 	}
 
-	// Load .env before setup decisions so DEPLOY_MODE / DATABASE_DRIVER work on first run
-	// (especially Windows double-click next to a .env file).
+	// .env first (does not override already-set process env), then CLI flags win.
 	config.LoadDotEnvFiles()
+	applyCLIToEnv(opt)
 
-	// CLI setup mode
-	if *setupMode {
+	if opt.setupCLI {
 		if err := setup.RunCLI(); err != nil {
 			log.Fatalf("Setup failed: %v", err)
 		}
 		return
 	}
 
+	if !opt.runServer {
+		printUsage(os.Stdout)
+		return
+	}
+
 	// Check if setup is needed
 	if setup.NeedsSetup() {
 		// DIY defaults to auto-setup (SQLite + embedded Redis) so operators never
-		// hit the Postgres/Redis wizard when launching a bare binary.
+		// hit the Postgres/Redis wizard when launching with -deploy-mode=diy.
 		if setup.AutoSetupEnabled() {
 			log.Println("Auto setup mode enabled (DIY uses SQLite + embedded Redis)...")
 			if err := setup.AutoSetupFromEnv(); err != nil {
@@ -93,12 +101,12 @@ func main() {
 			// Continue to main server after auto-setup
 		} else {
 			log.Println("First run detected, starting setup wizard...")
+			log.Println("Tip: use -deploy-mode=diy -auto-setup -admin-email=... -admin-password=... for headless install")
 			runSetupServer()
 			return
 		}
 	}
 
-	// Normal server mode
 	runMainServer()
 }
 
@@ -108,16 +116,12 @@ func runSetupServer() {
 	r.Use(middleware.CORS(config.CORSConfig{}))
 	r.Use(middleware.SecurityHeaders(config.CSPConfig{Enabled: true, Policy: config.DefaultCSPPolicy}, nil))
 
-	// Register setup routes
 	setup.RegisterRoutes(r)
 
-	// Serve embedded frontend if available
 	if web.HasEmbeddedFrontend() {
 		r.Use(web.ServeEmbeddedFrontend())
 	}
 
-	// Get server address from config.yaml or environment variables (SERVER_HOST, SERVER_PORT)
-	// This allows users to run setup on a different address if needed
 	addr := config.GetServerAddress()
 	log.Printf("Setup wizard available at http://%s", addr)
 	log.Println("Complete the setup wizard to configure Sub2API")
@@ -163,24 +167,18 @@ func runMainServer() {
 	defer app.Cleanup()
 	if app.PromptAudit != nil {
 		if err := app.PromptAudit.Start(context.Background()); err != nil {
-			// Startup continues so unrelated APIs stay up. Fail-closed (unavailable)
-			// applies only when a persisted blocking policy was observed; without
-			// blocking intent, Prompt Audit stays ModeOff so the gateway remains
-			// usable and administrators can still disable the feature (#4560).
 			log.Printf("Prompt Audit started in degraded state: %v", err)
 		}
 	}
 
-	// 启动服务器
 	go func() {
 		if err := app.Server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
 
-	log.Printf("Server started on %s", app.Server.Addr)
+	log.Printf("Server started on %s (deploy_mode=%s)", app.Server.Addr, cfg.DeployMode)
 
-	// 等待中断信号
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit

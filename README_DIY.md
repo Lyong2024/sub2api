@@ -27,53 +27,70 @@ GitHub Actions builds multi-platform packages on **every push to the `diy` branc
 
 Supported targets: `linux/amd64`, `linux/arm64`, `windows/amd64`, `darwin/amd64`, `darwin/arm64`.
 
-## Quick start (manual)
+## Quick start (CLI flags — preferred)
+
+Running with **no arguments** only prints help (does not start the server):
 
 ```bash
-# 1) Extract binary
-chmod +x sub2api
+./sub2api -h          # Windows: sub2api.exe -h
 
-# 2) Optional config
-cp config.example.yaml config.yaml   # or use .env.example → .env
-# Edit JWT_SECRET / ADMIN_* as needed
+# DIY first install + start (SQLite + embedded Redis)
+./sub2api -deploy-mode=diy -auto-setup \
+  -admin-email=admin@example.com \
+  -admin-password=change-me-now \
+  -port=8080
 
-# 3) Run
-export DEPLOY_MODE=diy
-export AUTO_SETUP=true
-./sub2api
+# Start with a YAML config
+./sub2api -config=./config.yaml
+./sub2api -c ./config.yaml
+
+# Custom data dir / DB file
+./sub2api -deploy-mode=diy -data-dir=./data -db-path=./data/sub2api.db -auto-setup
+
+# Standard topology (external Postgres + Redis)
+./sub2api -deploy-mode=standard -config=./config.yaml
+
+# Interactive terminal setup wizard
+./sub2api -setup
+```
+
+Windows PowerShell:
+
+```powershell
+.\sub2api.exe -deploy-mode=diy -auto-setup -admin-email=admin@example.com -admin-password=pass123456 -port=8080
+.\sub2api.exe -c .\config.yaml
 ```
 
 Open `http://127.0.0.1:8080`.  
-On first run the process creates SQLite schema, admin user, `config.yaml`, and `.installed`.
+First DIY run creates the SQLite schema, admin user, `config.yaml`, and `.installed`.
 
-### Environment variables
+### Precedence (high → low)
 
-| Variable | Meaning | Default |
-|----------|---------|---------|
-| `DEPLOY_MODE` | `diy` / `standard` | `standard` |
-| `DATABASE_DRIVER` | `sqlite` / `postgres` | `postgres` |
-| `DATABASE_PATH` | SQLite file path | `./data/sub2api.db` or `$DATA_DIR/sub2api.db` |
-| `REDIS_EMBEDDED` | In-process Redis | `true` in DIY |
-| `SERVER_PORT` | Listen port | `8080` |
-| `AUTO_SETUP` | Auto install if no config | `true` in DIY |
-| `ADMIN_EMAIL` | Bootstrap admin | `admin@sub2api.local` |
-| `ADMIN_PASSWORD` | Bootstrap password | auto-generated if empty |
-| `JWT_SECRET` | ≥32 bytes | auto-generated if empty |
-| `DATA_DIR` | Config + data directory | `.` |
-| `CONFIG_FILE` | Absolute config path | search paths |
+1. CLI flags  
+2. Process environment  
+3. `.env` / `DATA_DIR/.env`  
+4. YAML from `-config` or discovered `config.yaml`  
+5. Built-in defaults (`deploy_mode=diy` on this distribution)
 
-Example `.env`:
+### Common flags
 
-```bash
-DEPLOY_MODE=diy
-AUTO_SETUP=true
-SERVER_PORT=8080
-DATABASE_PATH=./data/sub2api.db
-ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=change-me-now
-JWT_SECRET=change-this-to-a-secure-random-string-32b
-TZ=Asia/Shanghai
-```
+| Flag | Meaning |
+|------|---------|
+| `-h` | Help |
+| `-config` / `-c` | YAML config path |
+| `-deploy-mode` | `diy` or `standard` |
+| `-run-mode` | `standard` or `simple` |
+| `-auto-setup` | Headless first-run install |
+| `-db-path` | SQLite path |
+| `-data-dir` | Data directory |
+| `-host` / `-port` | Listen address |
+| `-admin-email` / `-admin-password` | Bootstrap admin |
+| `-jwt-secret` | JWT secret |
+| `-timezone` / `-tz` | e.g. `Asia/Shanghai` |
+| `-setup` | Interactive wizard |
+| `-version` | Version |
+
+Environment variables remain supported as an alternative (`DEPLOY_MODE`, `CONFIG_FILE`, `ADMIN_*`, …). Prefer CLI flags over bat/sh wrappers.
 
 ## Linux: systemd (boot on start)
 

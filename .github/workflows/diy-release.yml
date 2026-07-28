@@ -147,20 +147,20 @@ jobs:
           set -euo pipefail
           mkdir -p package
           cp "dist/${BINARY}" "package/sub2api${{ matrix.ext }}"
-          # Ship examples only — do NOT pre-install config.yaml/.installed or AutoSetup is skipped
-          # and the users table stays empty (Windows login footgun).
+          # Ship examples only — do NOT pre-install config.yaml (would skip first-run bootstrap).
+          # Prefer CLI flags: sub2api -h / sub2api -deploy-mode=diy -auto-setup ...
           cp deploy/diy/config.example.yaml package/config.example.yaml
           cp deploy/diy/.env.example package/.env.example
-          cp deploy/diy/start.bat package/start.bat 2>/dev/null || true
           cp deploy/diy/sub2api.service package/ 2>/dev/null || true
           cp deploy/diy/install-systemd.sh package/ 2>/dev/null || true
           cp README_DIY.md package/ 2>/dev/null || true
           cp README_DIY_CN.md package/ 2>/dev/null || true
+          # Optional thin Windows helper that just forwards args to the binary
           if [[ "${{ matrix.goos }}" == "windows" ]]; then
             cp deploy/diy/start.bat package/start.bat
-            # Normalize CRLF for cmd.exe
             sed -i 's/$/\r/' package/start.bat 2>/dev/null || true
           fi
+
           cd package
           if [[ "${{ matrix.goos }}" == "windows" ]]; then
             # sub2api-260728-windows-amd64.zip
